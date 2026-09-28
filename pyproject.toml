@@ -1,0 +1,35 @@
+[build-system]
+requires = ["setuptools>=77"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "sciforge"
+version = "0.2.0"
+description = "Deterministic literature retrieval (PubMed, Crossref) and citation verification."
+readme = "README.md"
+requires-python = ">=3.10"
+license = "MIT"
+authors = [{ name = "SciForge contributors" }]
+dependencies = [
+    "httpx>=0.27,<1",
+    "pydantic>=2.5,<3",
+]
+
+[project.optional-dependencies]
+dev = ["pytest>=7.4"]
+
+[project.scripts]
+sciforge = "sciforge.cli:main"
+
+[project.urls]
+Homepage = "https://github.com/SaraSheikhlary/sciforge-open"
+
+[tool.setuptools]
+package-dir = { "" = "app" }
+
+[tool.setuptools.packages.find]
+where = ["app"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-ra"
