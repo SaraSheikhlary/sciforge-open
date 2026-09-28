@@ -1,0 +1,2 @@
+benchmark_id,research_question,scope_date_range,scope_targets,key_papers_doi_or_pmid,known_conflicts,expected_behavior,difficulty,domain,curator,date_created,notes
+BENCH-000,"TEMPLATE ROW - replace with a real research question","YYYY-YYYY","organism / cell type / material","DOI_1;DOI_2 (each verified to exist)","short description of known disagreement, or none","e.g. cite most key papers; flag conflict X; report insufficient evidence","easy|medium|hard","field name","curator name or handle","YYYY-MM-DD","this template row contains no real data and should be deleted"
