@@ -124,3 +124,219 @@ class Settings:
     def secret_values(self) -> list[str]:
         """Values that must never appear in logs or output files."""
         return [v for v in (self.ncbi_api_key, self.contact_email) if v]
+
+
+# ============================================================ v0.3 model layer
+#
+# Everything below is used only when the model layer is requested. v0.2's
+# ``Settings.from_env`` above never reads any of these variables, and
+# ``ModelSettings.from_env`` is never called on the v0.2 path.
+
+DEFAULT_XAI_BASE_URL = "https://api.x.ai"
+XAI_RESPONSES_PATH = "/v1/responses"
+
+# D8 budget defaults (per investigation).
+DEFAULT_MODEL_MAX_ATTEMPTS = 30  # every API attempt counts, retries included
+DEFAULT_MODEL_MAX_SOURCES = 10
+DEFAULT_MODEL_MAX_INPUT_TOKENS = 200_000
+DEFAULT_MODEL_MAX_OUTPUT_TOKENS = 2_000
+DEFAULT_MAX_SPEND_USD = 15.0
+DEFAULT_MODEL_TIMEOUT_SECONDS = 60.0
+MAX_SPEND_DISABLED_WORDS = frozenset({"none"})
+
+ELIGIBILITY_VERIFIED = "verified"
+ELIGIBILITY_VERIFIED_OR_PARTIAL = "verified_or_partial"
+
+_TRUE = frozenset({"1", "true", "yes", "on"})
+_FALSE = frozenset({"0", "false", "no", "off"})
+
+# Environment variables read by ModelSettings.from_env (documented in .env.example).
+MODEL_ENV_VARS = (
+    "XAI_API_KEY", "XAI_MODEL", "XAI_BASE_URL",
+    "SCIFORGE_MODEL_MAX_ATTEMPTS", "SCIFORGE_MODEL_MAX_SOURCES", "SCIFORGE_MODEL_MAX_INPUT_TOKENS",
+    "SCIFORGE_MODEL_MAX_OUTPUT_TOKENS", "SCIFORGE_MAX_SPEND_USD",
+    "SCIFORGE_PRICE_INPUT_PER_MTOK", "SCIFORGE_PRICE_OUTPUT_PER_MTOK",
+    "SCIFORGE_MODEL_TIMEOUT_SECONDS", "SCIFORGE_STORE_PROMPTS",
+    "SCIFORGE_MODEL_ELIGIBILITY", "SCIFORGE_MODEL_ENTAILMENT",
+)
+
+
+def _parse_bool(env: Mapping[str, str], name: str, default: bool) -> bool:
+    raw = _clean(env.get(name))
+    if raw is None:
+        return default
+    lowered = raw.lower()
+    if lowered in _TRUE:
+        return True
+    if lowered in _FALSE:
+        return False
+    raise ConfigError(f"{name} must be one of 1/0/true/false/yes/no/on/off")
+
+
+def _parse_optional_float(env: Mapping[str, str], name: str, lo: float, hi: float) -> float | None:
+    if _clean(env.get(name)) is None:
+        return None
+    return _parse_float(env, name, 0.0, lo, hi)
+
+
+def _parse_spend_cap(env: Mapping[str, str]) -> float | None:
+    """``SCIFORGE_MAX_SPEND_USD``: default 15; ``none`` disables; must be > 0."""
+    name = "SCIFORGE_MAX_SPEND_USD"
+    raw = _clean(env.get(name))
+    if raw is None:
+        return DEFAULT_MAX_SPEND_USD
+    if raw.lower() in MAX_SPEND_DISABLED_WORDS:
+        return None
+    try:
+        value = float(raw)
+    except ValueError as exc:
+        raise ConfigError(f"{name} must be a number of US dollars or 'none'") from exc
+    if not 0.0 < value <= 10_000.0:
+        raise ConfigError(f"{name} must be greater than 0 and at most 10000 (use 'none' to disable the cap)")
+    return value
+
+
+def _normalize_base_url(raw: str | None) -> str:
+    url = (raw or DEFAULT_XAI_BASE_URL).strip().rstrip("/")
+    lowered = url.lower()
+    if not lowered.startswith("https://"):
+        raise ConfigError("XAI_BASE_URL must start with https://")
+    host = url[len("https://"):]
+    if not host or "@" in host or "?" in host or "#" in host or any(c.isspace() for c in host):
+        raise ConfigError("XAI_BASE_URL must be a plain https URL without credentials, query, or fragment")
+    if lowered.endswith("/v1"):
+        url = url[:-3]
+    return url
+
+
+@dataclass(frozen=True)
+class ModelSettings:
+    """Settings for the optional v0.3 model layer (xAI Responses API).
+
+    Build with :meth:`from_env` only when the model layer is requested. The API
+    key is excluded from ``repr``/``str`` and must never be logged or stored.
+    """
+
+    api_key: str = field(repr=False)
+    model: str
+    base_url: str = DEFAULT_XAI_BASE_URL
+    max_attempts: int = DEFAULT_MODEL_MAX_ATTEMPTS
+    max_sources: int = DEFAULT_MODEL_MAX_SOURCES
+    max_input_tokens: int = DEFAULT_MODEL_MAX_INPUT_TOKENS
+    max_output_tokens_per_call: int = DEFAULT_MODEL_MAX_OUTPUT_TOKENS
+    max_spend_usd: float | None = DEFAULT_MAX_SPEND_USD
+    price_input_per_mtok: float | None = None
+    price_output_per_mtok: float | None = None
+    timeout_seconds: float = DEFAULT_MODEL_TIMEOUT_SECONDS
+    max_retries: int = DEFAULT_MAX_RETRIES
+    backoff_seconds: float = DEFAULT_BACKOFF_SECONDS
+    store_prompts: bool = True
+    eligibility: str = ELIGIBILITY_VERIFIED
+    entailment: bool = True
+
+    def __post_init__(self) -> None:
+        from sciforge.llm.client import ModelConfigError
+
+        if not self.api_key or not self.api_key.strip():
+            raise ModelConfigError("XAI_API_KEY is required for the model layer")
+        if not self.model or not self.model.strip():
+            raise ModelConfigError("XAI_MODEL is required for the model layer (no default model)")
+        if self.eligibility not in (ELIGIBILITY_VERIFIED, ELIGIBILITY_VERIFIED_OR_PARTIAL):
+            raise ModelConfigError("SCIFORGE_MODEL_ELIGIBILITY must be 'verified' or 'verified_or_partial'")
+        if self.max_spend_usd is not None and not self.prices_configured:
+            raise ModelConfigError(
+                "SCIFORGE_MAX_SPEND_USD is enabled but SCIFORGE_PRICE_INPUT_PER_MTOK and "
+                "SCIFORGE_PRICE_OUTPUT_PER_MTOK are not both set; set both prices (USD per 1M tokens, "
+                "from your xAI console) or disable the cap with SCIFORGE_MAX_SPEND_USD=none"
+            )
+
+    def __str__(self) -> str:
+        return repr(self)
+
+    @classmethod
+    def from_env(cls, environ: Mapping[str, str] | None = None) -> ModelSettings:
+        """Read model settings from ``environ``; raise ``ModelConfigError`` if invalid.
+
+        Call only when the model layer is requested; it requires ``XAI_API_KEY``
+        and ``XAI_MODEL`` and fails closed when the spend cap has no prices.
+        """
+        from sciforge.llm.client import ModelConfigError
+
+        env = os.environ if environ is None else environ
+        try:
+            api_key = _clean(env.get("XAI_API_KEY"))
+            model = _clean(env.get("XAI_MODEL"))
+            if api_key is None:
+                raise ModelConfigError("XAI_API_KEY is required for the model layer (read from the environment only)")
+            if model is None:
+                raise ModelConfigError("XAI_MODEL is required for the model layer (no default model)")
+            eligibility = (_clean(env.get("SCIFORGE_MODEL_ELIGIBILITY")) or ELIGIBILITY_VERIFIED).lower()
+            return cls(
+                api_key=api_key,
+                model=model,
+                base_url=_normalize_base_url(_clean(env.get("XAI_BASE_URL"))),
+                max_attempts=_parse_int(env, "SCIFORGE_MODEL_MAX_ATTEMPTS", DEFAULT_MODEL_MAX_ATTEMPTS, 1, 500),
+                max_sources=_parse_int(env, "SCIFORGE_MODEL_MAX_SOURCES", DEFAULT_MODEL_MAX_SOURCES, 1, 100),
+                max_input_tokens=_parse_int(env, "SCIFORGE_MODEL_MAX_INPUT_TOKENS", DEFAULT_MODEL_MAX_INPUT_TOKENS,
+                                            1_000, 10_000_000),
+                max_output_tokens_per_call=_parse_int(env, "SCIFORGE_MODEL_MAX_OUTPUT_TOKENS",
+                                                      DEFAULT_MODEL_MAX_OUTPUT_TOKENS, 16, 128_000),
+                max_spend_usd=_parse_spend_cap(env),
+                price_input_per_mtok=_parse_optional_float(env, "SCIFORGE_PRICE_INPUT_PER_MTOK", 0.0, 10_000.0),
+                price_output_per_mtok=_parse_optional_float(env, "SCIFORGE_PRICE_OUTPUT_PER_MTOK", 0.0, 10_000.0),
+                timeout_seconds=_parse_float(env, "SCIFORGE_MODEL_TIMEOUT_SECONDS", DEFAULT_MODEL_TIMEOUT_SECONDS,
+                                             1.0, 600.0),
+                max_retries=_parse_int(env, "SCIFORGE_MAX_RETRIES", DEFAULT_MAX_RETRIES, 0, 5),
+                backoff_seconds=_parse_float(env, "SCIFORGE_BACKOFF_SECONDS", DEFAULT_BACKOFF_SECONDS, 0.0, 60.0),
+                store_prompts=_parse_bool(env, "SCIFORGE_STORE_PROMPTS", True),
+                eligibility=eligibility,
+                entailment=_parse_bool(env, "SCIFORGE_MODEL_ENTAILMENT", True),
+            )
+        except ModelConfigError:
+            raise
+        except ConfigError as exc:
+            raise ModelConfigError(str(exc)) from None
+
+    @property
+    def prices_configured(self) -> bool:
+        return self.price_input_per_mtok is not None and self.price_output_per_mtok is not None
+
+    @property
+    def responses_url(self) -> str:
+        """Full URL of the Responses endpoint."""
+        return self.base_url + XAI_RESPONSES_PATH
+
+    @property
+    def include_partially_verified(self) -> bool:
+        """D2: partially verified sources only by explicit opt-in."""
+        return self.eligibility == ELIGIBILITY_VERIFIED_OR_PARTIAL
+
+    @property
+    def user_agent(self) -> str:
+        """User-Agent for model requests (no contact email)."""
+        return f"SciForge/{__version__} ({PROJECT_URL})"
+
+    def budget_limits(self):  # -> sciforge.llm.budget.BudgetLimits
+        from sciforge.llm.budget import BudgetLimits
+
+        return BudgetLimits(
+            max_attempts=self.max_attempts,
+            max_sources=self.max_sources,
+            max_input_tokens=self.max_input_tokens,
+            max_output_tokens_per_call=self.max_output_tokens_per_call,
+            max_spend_usd=self.max_spend_usd,
+        )
+
+    def retry_policy(self):  # -> sciforge.llm.budget.RetryPolicy
+        from sciforge.llm.budget import RetryPolicy
+
+        return RetryPolicy(max_retries=self.max_retries, backoff_seconds=self.backoff_seconds)
+
+    def price_table(self):  # -> sciforge.llm.budget.PriceTable
+        from sciforge.llm.budget import PriceTable
+
+        return PriceTable(input_per_mtok=self.price_input_per_mtok, output_per_mtok=self.price_output_per_mtok)
+
+    def secret_values(self) -> list[str]:
+        """Values that must never appear in logs, audit records, or output files."""
+        return [self.api_key] if self.api_key else []

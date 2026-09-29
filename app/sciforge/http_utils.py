@@ -107,6 +107,30 @@ def retry_after_seconds(response: httpx.Response, now: datetime | None = None) -
     return min(max(seconds, 0.0), MAX_RETRY_AFTER_SECONDS)
 
 
+def is_retryable_status(status: int) -> bool:
+    """True for HTTP statuses that are retried: 429 and every 5xx."""
+    return status == 429 or status >= 500
+
+
+def compute_backoff(
+    base_seconds: float,
+    attempt: int,
+    response: httpx.Response | None = None,
+    now: datetime | None = None,
+) -> float:
+    """Delay before retry number ``attempt + 1``.
+
+    Uses the response's ``Retry-After`` (clamped to [0, 30] s) when present,
+    otherwise ``base_seconds * 2**attempt``. Shared by :class:`HttpFetcher`
+    and the v0.3 model client so both follow identical retry semantics.
+    """
+    if response is not None:
+        retry_after = retry_after_seconds(response, now)
+        if retry_after is not None:
+            return retry_after
+    return base_seconds * (2**attempt)
+
+
 class HttpFetcher:
     """Performs GET requests returning JSON, with retries and logging."""
 
@@ -132,11 +156,8 @@ class HttpFetcher:
         return RateLimiter(min_interval, sleep=self.sleep, clock=self.clock)
 
     def _backoff(self, attempt: int, response: httpx.Response | None = None) -> float:
-        if response is not None:
-            retry_after = retry_after_seconds(response, self.now())
-            if retry_after is not None:
-                return retry_after
-        return self.settings.backoff_seconds * (2**attempt)
+        now = self.now() if response is not None else None
+        return compute_backoff(self.settings.backoff_seconds, attempt, response, now)
 
     def _attempt(self, url: str, params: Mapping[str, Any]) -> tuple[FetchResult, bool, httpx.Response | None]:
         """One attempt. Returns (result, retryable, response)."""

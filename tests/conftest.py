@@ -43,8 +43,11 @@ def _block_network(monkeypatch: pytest.MonkeyPatch) -> None:
 @pytest.fixture(autouse=True)
 def _clean_env(monkeypatch: pytest.MonkeyPatch) -> None:
     """Tests never see real credentials from the developer's environment."""
+    from sciforge.config import MODEL_ENV_VARS
+
     for name in ("NCBI_API_KEY", "SCIFORGE_CONTACT_EMAIL", "SCIFORGE_TIMEOUT_SECONDS",
-                 "SCIFORGE_MAX_RETRIES", "SCIFORGE_BACKOFF_SECONDS", "XAI_API_KEY"):
+                 "SCIFORGE_MAX_RETRIES", "SCIFORGE_BACKOFF_SECONDS", "XAI_API_KEY", *MODEL_ENV_VARS,
+                 "SCIFORGE_LIVE_XAI"):
         monkeypatch.delenv(name, raising=False)
 
 
@@ -195,3 +198,39 @@ def fast_sleep(monkeypatch: pytest.MonkeyPatch) -> Sleeper:
     recorder = Sleeper()
     monkeypatch.setattr(time, "sleep", recorder)
     return recorder
+
+
+# ---------------------------------------------------------------- v0.3 model layer helpers
+# Fake credentials only; no test ever talks to the real xAI API (D7).
+
+FAKE_XAI_KEY = "xai-FAKE-test-key-not-real-0000000000"
+FAKE_XAI_MODEL = "test-model"
+TEST_XAI_BASE = "https://api.x.ai.test"
+
+
+def model_env(**overrides: str) -> dict[str, str]:
+    """Minimal valid model-layer environment (spend cap disabled unless prices given)."""
+    env = {"XAI_API_KEY": FAKE_XAI_KEY, "XAI_MODEL": FAKE_XAI_MODEL, "SCIFORGE_MAX_SPEND_USD": "none"}
+    env.update(overrides)
+    return {k: v for k, v in env.items() if v is not None}
+
+
+def responses_payload(text: str | None = '{"answer": "ok"}', *, status: str = "completed",
+                      usage: dict[str, Any] | None = None, model: str = FAKE_XAI_MODEL,
+                      response_id: str = "resp_test_1", extra_output: list[dict[str, Any]] | None = None,
+                      **fields: Any) -> dict[str, Any]:
+    """A Responses API payload shaped like docs.x.ai's example."""
+    output: list[dict[str, Any]] = list(extra_output or [])
+    if text is not None:
+        output.append({"type": "message", "role": "assistant", "id": "msg_1", "status": "completed",
+                       "content": [{"type": "output_text", "text": text, "annotations": []}]})
+    payload: dict[str, Any] = {
+        "id": response_id, "object": "response", "model": model, "status": status, "store": False,
+        "output": output,
+        "usage": usage if usage is not None else {
+            "input_tokens": 120, "output_tokens": 30, "total_tokens": 150,
+            "input_tokens_details": {"cached_tokens": 0}, "output_tokens_details": {"reasoning_tokens": 0}},
+        "incomplete_details": None, "error": None,
+    }
+    payload.update(fields)
+    return payload

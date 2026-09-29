@@ -16,11 +16,22 @@ REDACTED = "[REDACTED]"
 # Parameter names whose values are never written anywhere. The contact email is
 # not a credential, but it is personal data and is not needed to rerun a search.
 SENSITIVE_PARAM_NAMES = frozenset(
-    {"api_key", "apikey", "key", "token", "access_token", "password", "secret", "email", "mailto"}
+    {"api_key", "apikey", "key", "token", "access_token", "password", "secret", "email", "mailto",
+     # v0.3 model layer (xAI): header / variable names that carry the API key.
+     "authorization", "x-api-key", "xai_api_key"}
 )
 _SENSITIVE_IN_TEXT_RE = re.compile(
-    r"(?i)\b(api_key|apikey|access_token|token|password|secret|email|mailto)=([^&\s\"']+)"
+    r"(?i)\b(xai_api_key|api_key|apikey|access_token|token|password|secret|email|mailto)=([^&\s\"']+)"
 )
+# ``Bearer <token>`` anywhere (e.g. an echoed Authorization header). The token
+# must be >= 8 characters and contain a digit so prose ("bearer bonds") is kept.
+_BEARER_RE = re.compile(r"(?i)\b(bearer)\s+(?=[A-Za-z0-9._~+/=\-]*\d)[A-Za-z0-9._~+/=\-]{8,}")
+# ``Authorization: <scheme> <value>`` / ``X-API-Key: <value>`` header lines (any scheme).
+_AUTH_HEADER_RE = re.compile(
+    r"(?i)\b(authorization|x-api-key)(\"?\s*[:=]\s*\"?)(?!\[REDACTED\])(?:(bearer|basic|token)\s+)?[^\s,;\"'}]+"
+)
+# Key-shaped xAI tokens (``xai-`` followed by a long alphanumeric run).
+_XAI_KEY_RE = re.compile(r"\bxai-[A-Za-z0-9_\-]{16,}")
 _MIN_SECRET_LENGTH = 4
 
 
@@ -70,10 +81,16 @@ def redact_url(url: str) -> str:
 def redact_text(text: str, secrets: Iterable[str | None] = ()) -> str:
     """Remove secrets from free text (error messages, log lines).
 
-    Replaces ``name=value`` pairs for sensitive names and any literal
-    occurrence of the given secret values.
+    Replaces ``name=value`` pairs for sensitive names, ``Bearer`` tokens,
+    ``Authorization:`` / ``X-API-Key:`` header values, ``xai-``-prefixed key-shaped
+    tokens, and any literal occurrence of the given secret values.
     """
     result = _SENSITIVE_IN_TEXT_RE.sub(lambda m: f"{m.group(1)}={REDACTED}", text)
+    result = _BEARER_RE.sub(lambda m: f"{m.group(1)} {REDACTED}", result)
+    result = _AUTH_HEADER_RE.sub(
+        lambda m: f"{m.group(1)}{m.group(2)}" + (f"{m.group(3)} " if m.group(3) else "") + REDACTED, result
+    )
+    result = _XAI_KEY_RE.sub(REDACTED, result)
     for secret in secrets:
         if secret and len(secret) >= _MIN_SECRET_LENGTH:
             result = result.replace(secret, REDACTED)

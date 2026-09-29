@@ -32,4 +32,9 @@ where = ["app"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
-addopts = "-ra"
+# Live xAI tests (D7) are opt-in only and deselected by default; normal and CI
+# runs never call the real API (all model tests use FakeModelClient / MockTransport).
+addopts = "-ra -m 'not live_xai'"
+markers = [
+    "live_xai: calls the real xAI API; opt-in only, never run automatically (deselected by default)",
+]
