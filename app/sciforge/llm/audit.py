@@ -8,6 +8,9 @@ are included only when ``store_prompts`` is True (``SCIFORGE_STORE_PROMPTS``,
 default true). Request headers — and therefore the Authorization header and
 API key — are never part of an entry; every string is additionally scrubbed of
 known secret values and Bearer/Authorization patterns before it is stored.
+Only the reasoning-effort *setting* is recorded; hidden reasoning returned by
+the provider (reasoning output items, encrypted reasoning, summaries) never
+reaches an entry, because clients only return ``output_text`` and usage.
 """
 
 from __future__ import annotations
@@ -36,6 +39,8 @@ def request_fingerprint(request: ModelRequest) -> str:
             "json_schema": request.json_schema,
             "max_output_tokens": request.max_output_tokens,
             "temperature": request.temperature,
+            # only when set, so fingerprints of requests without a reasoning effort are unchanged
+            **({"reasoning_effort": request.reasoning_effort} if request.reasoning_effort is not None else {}),
         },
         sort_keys=True,
         separators=(",", ":"),
@@ -77,6 +82,7 @@ class ModelCallAudit:
             "schema_name": request.schema_name,
             "max_output_tokens": request.max_output_tokens,
             "temperature": request.temperature,
+            "reasoning_effort": request.reasoning_effort,   # the setting only; reasoning content is never stored
             "request_sha256": request_fingerprint(request),
             "prompts_stored": self.store_prompts,
         }

@@ -21,9 +21,11 @@ keyword list.
 This module only builds queries. Merging per-query search results
 (:func:`merge_query_outcomes`) keeps the first occurrence of an identical hit
 (same ``record_id``, i.e. same database and identifier) returned by several
-queries and caps each database at ``max_results``; cross-database duplicate
+queries and caps each database at ``max_results`` (the pipeline passes a cap
+large enough to keep the whole candidate pool); cross-database duplicate
 detection, merging and citation verification are still done by the existing,
-unchanged v0.2 ``dedup`` and ``verify`` modules.
+unchanged v0.2 ``dedup`` and ``verify`` modules, and the final set is chosen by
+:mod:`sciforge.source_selection`.
 """
 
 from __future__ import annotations

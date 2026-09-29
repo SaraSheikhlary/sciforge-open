@@ -52,13 +52,18 @@ def build_parser() -> argparse.ArgumentParser:
         "investigate",
         help="search PubMed and Crossref for a question, deduplicate, and verify identifiers",
         description=(
-            "Search PubMed and Crossref using the research question verbatim as the query, "
-            "deduplicate the records, verify each DOI/PMID, and write JSON outputs. "
+            "Search PubMed and Crossref with the research question verbatim plus deterministic rule-based "
+            "focused queries (no model), collect a candidate pool per query and database "
+            "(SCIFORGE_CANDIDATE_POOL_PER_QUERY, default 10), deduplicate, rank the candidates "
+            "deterministically for relevance and concept diversity, verify each selected DOI/PMID (with "
+            "backfill if verification fails), and write JSON outputs. "
             "No conclusions or evidence extraction are produced in v0.2."
         ),
     )
-    inv.add_argument("question", help="research question (used verbatim as the search query)")
-    inv.add_argument("--max-results", type=_positive_int, default=20, help="maximum records per source (default: 20)")
+    inv.add_argument("question", help="research question (always searched verbatim, plus rule-based focused queries)")
+    inv.add_argument("--max-results", type=_positive_int, default=20,
+                     help="per-database result size (default: 20): each query requests max(N, candidate pool) "
+                          "records per database and up to 2*N selected records are verified")
     inv.add_argument("--from-year", type=_year, default=None, help="earliest publication year (inclusive)")
     inv.add_argument("--to-year", type=_year, default=None, help="latest publication year (inclusive)")
     inv.add_argument("--output-dir", default="runs", help="directory for run outputs (default: runs/)")
@@ -72,16 +77,24 @@ def build_parser() -> argparse.ArgumentParser:
 def format_summary(summary: dict[str, Any], run_dir: str) -> str:
     """Short human-readable run summary."""
     v = summary["verification_counts"]
+    qe = summary.get("query_expansion") or {}
+    n_queries = len(qe.get("queries") or []) or 1
     lines = [
         f"SciForge {summary['sciforge_version']} — retrieval and verification only (no conclusions).",
-        f"Question/query: {summary['question']}",
-        "Retrieved: " + ", ".join(f"{db} {n}" for db, n in summary["retrieved_per_source"].items())
+        f"Question: {summary['question']}",
+        f"Queries: {n_queries} per database (query expansion {'on' if qe.get('enabled') else 'off'}; "
+        "see search_log.json)",
+        "Candidates retrieved: " + ", ".join(f"{db} {n}" for db, n in summary["retrieved_per_source"].items())
         + f" (total {summary['total_retrieved']})",
         f"Unique records: {summary['unique_records']} (duplicates merged: {summary['duplicates_merged']})",
         f"Verification: verified {v['verified']}, partially_verified {v['partially_verified']}, "
         f"not_verified {v['not_verified']}",
         f"Errors recorded: {summary['errors_count']}",
     ]
+    sel = summary.get("selection")
+    if sel:
+        lines.insert(5, f"Selected: {len(sel.get('selected_record_ids') or [])} of target {sel.get('target')} "
+                        f"({sel.get('candidates_verified', 0)} candidates verified)")
     if summary["failed_databases"]:
         lines.append("Failed databases: " + ", ".join(summary["failed_databases"]))
     if summary["partially_failed_databases"]:

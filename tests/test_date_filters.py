@@ -69,7 +69,9 @@ def test_date_filters_passed_through_pipeline(tmp_path, settings):
     assert (es["mindate"], es["maxdate"], es["datetype"]) == ("2020", "2024", "pdat")
     cr = [r.url.params for r in rec.requests if r.url.path == "/works"][0]
     assert cr["filter"] == "from-pub-date:2020,until-pub-date:2024"
-    assert result.summary["parameters"] == {"max_results_per_source": 20, "from_year": 2020, "to_year": 2024}
+    assert result.summary["parameters"] == {"max_results_per_source": 20, "from_year": 2020, "to_year": 2024,
+                                            "candidate_pool_per_query": 10, "records_requested_per_query": 20,
+                                            "max_selected": 40}
 
 
 def test_date_filters_passed_through_cli(tmp_path, fast_sleep):
@@ -78,9 +80,10 @@ def test_date_filters_passed_through_cli(tmp_path, fast_sleep):
                  "--output-dir", str(tmp_path)], client=mock_client(rec))
     assert code == 0
     es = rec.params_for("esearch.fcgi")[0]
-    assert (es["mindate"], es["maxdate"], es["retmax"]) == ("2020", "2024", "3")
+    # each query requests max(candidate pool (default 10), --max-results) records before dedup/selection
+    assert (es["mindate"], es["maxdate"], es["retmax"]) == ("2020", "2024", "10")
     cr = [r.url.params for r in rec.requests if r.url.path == "/works"][0]
-    assert cr["filter"] == "from-pub-date:2020,until-pub-date:2024" and cr["rows"] == "3"
+    assert cr["filter"] == "from-pub-date:2020,until-pub-date:2024" and cr["rows"] == "10"
 
 
 def test_same_from_and_to_year_allowed(tmp_path, fast_sleep):

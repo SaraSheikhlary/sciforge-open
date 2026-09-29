@@ -12,7 +12,7 @@ from __future__ import annotations
 
 import hashlib
 import time
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass, field
 from datetime import datetime
 from typing import Any, Generic, TypeVar
@@ -28,6 +28,7 @@ from sciforge.llm.client import (
     ModelRequest,
     ModelResponseParseError,
     ModelSchemaError,
+    stage_key,
 )
 from sciforge.llm.parsing import parse_json_text
 from sciforge.logging_utils import iso_utc, utc_now
@@ -50,10 +51,21 @@ class CallContext:
     keep_attempts: int = 0
     sleep: Callable[[float], None] = time.sleep
     now: Callable[[], datetime] = utc_now
+    # Effective reasoning effort per logical stage (question, evidence, gaps, hypotheses, report); a stage
+    # missing from the mapping sends no reasoning parameter. Built from ModelSettings.reasoning_efforts().
+    reasoning_efforts: Mapping[str, str] = field(default_factory=dict)
 
     @property
     def max_output_tokens(self) -> int:
+        """Global per-call output cap (stage-independent fallback)."""
         return self.tracker.limits.max_output_tokens_per_call
+
+    def max_output_tokens_for(self, stage: str | None) -> int:
+        """Effective output cap for ``stage`` (stage override from the budget limits, else the global cap)."""
+        return self.tracker.limits.max_output_tokens_for(stage)
+
+    def reasoning_effort_for(self, stage: str | None) -> str | None:
+        return self.reasoning_efforts.get(stage_key(stage) or "")
 
 
 @dataclass
@@ -122,9 +134,10 @@ def _run(ctx: CallContext, result: StructuredResult[T], *, stage: str, instructi
          validate: Callable[[Any, str], T], record_id: str | None) -> StructuredResult[T]:
     history = list(messages)
     for repair in (False, True):
-        request = ModelRequest(messages=tuple(history), max_output_tokens=ctx.max_output_tokens,
+        request = ModelRequest(messages=tuple(history), max_output_tokens=ctx.max_output_tokens_for(stage),
                                schema_name=schema_name, json_schema=json_schema, instructions=instructions,
-                               stage=f"{stage}:repair" if repair else stage)
+                               stage=f"{stage}:repair" if repair else stage,
+                               reasoning_effort=ctx.reasoning_effort_for(stage))
         result.logical_calls += 1
         result.repaired = repair
         try:

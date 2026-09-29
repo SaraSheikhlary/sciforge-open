@@ -210,12 +210,19 @@ def test_expansion_changes_nothing_when_all_queries_return_the_same_hits(tmp_pat
     assert [v.status for v in on.verification] == [v.status for v in off.verification]
 
 
-def test_max_results_caps_merged_records_per_database(tmp_path, settings):
+def test_candidate_pool_is_larger_than_final_selection(tmp_path, settings):
+    """Every query's hits enter the candidate pool; only max_selected (default 2 * max_results) are verified."""
     plan = expand_queries(PLATELET_Q)
     ids = {q.pubmed: [str(100 + 10 * i + k) for k in range(5)] for i, q in enumerate(plan.queries)}
-    result = run(tmp_path, PLATELET_Q, term_handler(ids, {}), settings, max_results=4)
-    assert result.summary["retrieved_per_source"]["pubmed"] == 4
-    assert [r.pmid for r in result.records] == ["100", "110", "120", "130"]   # rank-1 hits of the first queries
+    handler = term_handler(ids, {})
+    result = run(tmp_path, PLATELET_Q, handler, settings, max_results=4)
+    s = result.summary
+    assert s["retrieved_per_source"]["pubmed"] == 5 * len(plan.queries)     # no truncation before dedup
+    assert s["unique_records"] == 5 * len(plan.queries)
+    assert len(result.records) == 8 and s["selection"]["target"] == 8
+    assert len(s["selection"]["selected_record_ids"]) == 8
+    esearch = [r for r in handler.requests if r.url.path.endswith("esearch.fcgi")]
+    assert {r.url.params["retmax"] for r in esearch} == {"10"}                # max(pool 10, max_results 4)
 
 
 def test_single_query_retrieval_still_works(tmp_path, settings):

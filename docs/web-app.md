@@ -127,10 +127,16 @@ an `XAIClient`. The live runner checks again. Demo Mode ignores the gate and cre
 ### What Live Mode does
 
 Live Mode is disabled in the UI unless the gate is on **and** both `XAI_API_KEY` and `XAI_MODEL` are present. When enabled,
-it runs v0.2 retrieval and verification (PubMed + Crossref) and then the v0.3 pipeline with the existing
+it runs v0.2 retrieval (expanded queries, a candidate pool of `SCIFORGE_CANDIDATE_POOL_PER_QUERY` records per
+query and database, default 10), deduplication, deterministic relevance/diversity selection and verification
+with backfill, so that at most the selected "Maximum sources" (and `SCIFORGE_MODEL_MAX_SOURCES`) verified
+records reach the model; and then the v0.3 pipeline with the existing
 `XAIClient` (Responses API, `store=false`). All existing limits apply unchanged, read by
 `ModelSettings.from_env`: `SCIFORGE_MODEL_MAX_ATTEMPTS`, `SCIFORGE_MODEL_MAX_SOURCES`,
-`SCIFORGE_MODEL_MAX_INPUT_TOKENS`, `SCIFORGE_MODEL_MAX_OUTPUT_TOKENS`, `SCIFORGE_MAX_SPEND_USD` (default
+`SCIFORGE_MODEL_MAX_INPUT_TOKENS` (default 200,000), `SCIFORGE_MODEL_MAX_OUTPUT_TOKENS` (default 2,000) and its
+per-stage overrides `SCIFORGE_MODEL_MAX_OUTPUT_TOKENS_{QUESTION,EVIDENCE,GAPS,HYPOTHESES,REPORT}`,
+`SCIFORGE_MODEL_REASONING_EFFORT` (default `high`) and its overrides
+`SCIFORGE_MODEL_REASONING_EFFORT_{EVIDENCE,GAPS,HYPOTHESES,REPORT}`, `SCIFORGE_MAX_SPEND_USD` (default
 15 USD; while the cap is on, `SCIFORGE_PRICE_INPUT_PER_MTOK` and `SCIFORGE_PRICE_OUTPUT_PER_MTOK` must be
 set or Live Mode refuses to start — set `SCIFORGE_MAX_SPEND_USD=none` to disable the cap explicitly). See
 `.env.example` for all variables. A budget stop or an authentication failure is reported as a status; the

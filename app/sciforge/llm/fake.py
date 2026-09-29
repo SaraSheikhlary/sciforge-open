@@ -8,7 +8,9 @@ Script items, consumed in order, one per ``complete()`` call:
 * ``ModelError``       → raised
 * callable(request)    → called; its return value is handled like the above
 
-Every request is recorded in ``requests`` for assertions.
+Every request is recorded in ``requests`` for assertions; the reasoning effort
+received with each request (``None`` when none was sent) is also recorded in
+``reasoning_efforts``.
 """
 
 from __future__ import annotations
@@ -36,6 +38,7 @@ class FakeModelClient:
         self._script: list[ScriptItem] = list(script)
         self._usage = usage if usage is not None else ModelUsage(reported=False)
         self.requests: list[ModelRequest] = []
+        self.reasoning_efforts: list[str | None] = []
 
     def add(self, *items: ScriptItem) -> FakeModelClient:
         self._script.extend(items)
@@ -47,6 +50,7 @@ class FakeModelClient:
 
     def complete(self, request: ModelRequest) -> ModelResponse:
         self.requests.append(request)
+        self.reasoning_efforts.append(request.reasoning_effort)
         if not self._script:
             raise AssertionError("FakeModelClient script exhausted (unexpected extra model call)")
         item: Any = self._script.pop(0)

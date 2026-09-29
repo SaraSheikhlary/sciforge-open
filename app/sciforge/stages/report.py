@@ -28,7 +28,7 @@ from __future__ import annotations
 
 import hashlib
 import re
-from collections.abc import Iterable, Mapping, Sequence
+from collections.abc import Callable, Iterable, Mapping, Sequence
 from typing import Any, Literal
 
 from pydantic import Field
@@ -242,6 +242,41 @@ def _paragraph_line(p: Mapping[str, Any], evidence_by_id: Mapping[str, Mapping[s
     return f"- **[{p['label']}]** {_md(p['text'].strip())}{tail}"
 
 
+
+def _search_queries(w: Callable[[str], None], summary: Mapping[str, Any], question: str) -> None:
+    """Section B query lines: every query actually sent to each database (not just the question)."""
+    qe = summary.get("query_expansion") or {}
+    queries = qe.get("queries") or []
+    w(f"- **Query generation:** {_md(summary.get('query_generation', 'not recorded'))}")
+    if not queries:
+        w(f"- **Query used (verbatim):** `{_md(summary.get('query_used', question))}`")
+        return
+    enabled = "enabled" if qe.get("enabled") else "disabled"
+    w(f"- **Query expansion:** {enabled}; {len(queries)} "
+      f"quer{'y' if len(queries) == 1 else 'ies'} per database (the question verbatim is always q1)")
+    for q in queries:
+        results = q.get("results") or {}
+        for db in ("pubmed", "crossref"):
+            if db not in q:
+                continue
+            r = results.get(db) or {}
+            counts = (f"{r.get('retrieved', 'n/a')} retrieved, {r.get('contributed', 'n/a')} new candidates"
+                      if r else "counts not recorded")
+            w(f"  - {_md(str(q.get('query_id', '?')))} {db}: {_md(str(q[db]))} — {counts}")
+
+
+def _selection_lines(w: Callable[[str], None], summary: Mapping[str, Any]) -> None:
+    sel = summary.get("selection") or {}
+    if not sel:
+        return
+    params = summary.get("parameters") or {}
+    w(f"- **Candidate pool:** {params.get('records_requested_per_query', 'n/a')} records requested per query and "
+      f"database; {summary.get('total_retrieved', 'n/a')} candidates before deduplication")
+    w(f"- **Selection:** {_md(str(sel.get('method', 'deterministic')))}; target {sel.get('target', 'n/a')} verified "
+      f"records, {sel.get('candidates_verified', 'n/a')} candidates sent to verification"
+      + (" (backfilled after failed verification)" if sel.get("backfilled") else "")
+      + f", {len(sel.get('selected_record_ids') or [])} selected")
+
 def build_report(
     *,
     question: str,
@@ -295,8 +330,7 @@ def build_report(
     w("")
     if search_summary:
         params = search_summary.get("parameters") or {}
-        w(f"- **Query used (verbatim):** `{_md(search_summary.get('query_used', question))}`")
-        w(f"- **Query generation:** {_md(search_summary.get('query_generation', 'not recorded'))}")
+        _search_queries(w, search_summary, question)
         w(f"- **Databases:** {', '.join(search_summary.get('databases_queried') or []) or 'not recorded'}")
         w(f"- **Run:** started {search_summary.get('started_at', 'n/a')}, finished {search_summary.get('finished_at', 'n/a')} (UTC)")
         w(f"- **Year filter:** from {params.get('from_year') or 'any'} to {params.get('to_year') or 'any'}; "
@@ -305,15 +339,18 @@ def build_report(
         got = search_summary.get("retrieved_per_source") or {}
         for db in search_summary.get("databases_queried") or []:
             w(f"- **{db}:** status {(search_summary.get('search_status') or {}).get(db, 'n/a')}, "
-              f"hits reported {hits.get(db, 'n/a')}, retrieved {got.get(db, 'n/a')}")
+              f"hits reported {hits.get(db, 'n/a')}, candidates retrieved {got.get(db, 'n/a')}")
         w(f"- **Unique records after deduplication:** {search_summary.get('unique_records', 'n/a')}")
+        _selection_lines(w, search_summary)
         vc = search_summary.get("verification_counts") or {}
         w(f"- **v0.2 verification:** " + ", ".join(f"{k} {v}" for k, v in vc.items()))
     else:
         w("- v0.2 search metadata was not provided to the report stage.")
     concepts = (question_definition or {}).get("key_concepts") or []
     w(f"- **Concepts (model-proposed, not used for searching):** " + ("; ".join(_md(c) for c in concepts) or "none"))
-    w("- **Inclusion/exclusion criteria:** none applied (v0.2 searches the question verbatim). Model eligibility: "
+    w("- **Inclusion/exclusion criteria:** no inclusion/exclusion criteria applied beyond the year filter; "
+      "candidates were ranked deterministically from retrieved titles and query provenance (see above). "
+      "Model eligibility: "
       f"{source_texts.get('eligibility_policy', 'verified')} records, at most {source_texts.get('max_sources', 'n/a')} "
       f"sources, abstracts capped at {source_texts.get('max_source_chars', 'n/a')} characters.")
     w("")

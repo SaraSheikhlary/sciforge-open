@@ -19,6 +19,20 @@ from typing import Any, Literal, Protocol, runtime_checkable
 Role = Literal["system", "user", "assistant"]
 _ROLES = ("system", "user", "assistant")
 
+# Pipeline stage names -> logical model stages used by stage-aware settings
+# (SCIFORGE_MODEL_MAX_OUTPUT_TOKENS_<STAGE>, SCIFORGE_MODEL_REASONING_EFFORT_<STAGE>).
+_STAGE_ALIASES = {"extraction": "evidence"}
+# Must match sciforge.config.REASONING_EFFORTS (this module has no config dependency).
+REASONING_EFFORT_VALUES = ("low", "medium", "high", "xhigh")
+
+
+def stage_key(stage: str | None) -> str | None:
+    """Logical stage of a request stage label: ``"gaps:repair"`` -> ``"gaps"``, ``"extraction"`` -> ``"evidence"``."""
+    if not stage:
+        return None
+    base = stage.split(":", 1)[0].strip().lower()
+    return _STAGE_ALIASES.get(base, base) or None
+
 
 @dataclass(frozen=True)
 class ModelMessage:
@@ -54,6 +68,7 @@ class ModelRequest:
     instructions: str | None = None
     temperature: float = 0.0
     stage: str | None = None
+    reasoning_effort: str | None = None   # e.g. "high"; sent as {"reasoning": {"effort": ...}} when set
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "messages", tuple(self.messages))
@@ -71,6 +86,8 @@ class ModelRequest:
             raise TypeError("json_schema must be a dict")
         if not 0.0 <= float(self.temperature) <= 2.0:
             raise ValueError("temperature must be between 0 and 2")
+        if self.reasoning_effort is not None and self.reasoning_effort not in REASONING_EFFORT_VALUES:
+            raise ValueError(f"reasoning_effort must be one of {', '.join(REASONING_EFFORT_VALUES)}")
 
     @property
     def structured(self) -> bool:
@@ -82,7 +99,7 @@ class ModelRequest:
         return ModelRequest(
             messages=self.messages, max_output_tokens=value, schema_name=self.schema_name,
             json_schema=self.json_schema, instructions=self.instructions,
-            temperature=self.temperature, stage=self.stage,
+            temperature=self.temperature, stage=self.stage, reasoning_effort=self.reasoning_effort,
         )
 
     def total_chars(self) -> int:

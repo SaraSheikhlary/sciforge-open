@@ -679,11 +679,17 @@ def _run_live(req: InvestigationRequest, tracker: _Progress, tmp: Path, env: Map
     question = req.question.strip()
 
     tracker.emit("search", "running", "PubMed and Crossref")
+    # Candidate pool per query (SCIFORGE_CANDIDATE_POOL_PER_QUERY) -> dedup -> deterministic selection ->
+    # verification with backfill -> at most max_sources verified records for the model.
     v02 = run_investigation(question, max_results=req.max_sources, from_year=req.from_year, to_year=req.to_year,
                             output_dir=tmp / "v02", settings=settings, client=http_client,
+                            max_selected=model_settings.max_sources,
+                            accept_partially_verified=model_settings.include_partially_verified,
                             **({"sleep": sleep} if sleep is not None else {}))
-    tracker.emit("search", "done", f"{v02.summary.get('total_retrieved', 0)} records retrieved")
-    tracker.emit("verify", "done", "DOI/PMID verification (v0.2)")
+    tracker.emit("search", "done", f"{v02.summary.get('total_retrieved', 0)} candidate records retrieved "
+                                   f"({v02.summary.get('unique_records', 0)} after deduplication)")
+    selected = len((v02.summary.get("selection") or {}).get("selected_record_ids") or [])
+    tracker.emit("verify", "done", f"DOI/PMID verification (v0.2): {selected} records selected and verified")
     if factory is not None:
         inner = factory(model_settings)
     else:

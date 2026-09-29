@@ -222,7 +222,8 @@ def run_model_pipeline(
             http.close()
     _write_json(files["source_texts"], {**header, "generated_at": iso_utc(now()), **batch.to_json()}, secrets)
 
-    ctx = CallContext(client=model_client, tracker=tracker, audit=audit, retry=retry, sleep=sleep_fn, now=now)
+    ctx = CallContext(client=model_client, tracker=tracker, audit=audit, retry=retry, sleep=sleep_fn, now=now,
+                      reasoning_efforts=model_settings.reasoning_efforts() if model_settings is not None else {})
 
     # ---- S1: question definition (question only)
     q = run_question_stage(ctx, query)

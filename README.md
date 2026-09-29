@@ -87,13 +87,31 @@ No API key is required for v0.2. `XAI_API_KEY` is reserved for the model layer i
 | Option | Default | Meaning |
 |---|---|---|
 | `question` | required | Research question; always searched verbatim, plus rule-based focused queries |
-| `--max-results N` | 20 | Maximum records per source (1–1000) |
+| `--max-results N` | 20 | Per-database result size (1–1000): each query requests `max(N, candidate pool)` records per source; up to `2 × N` selected records are verified |
 | `--from-year YYYY` / `--to-year YYYY` | none | Inclusive publication-year range (1800–2100; either may be omitted) |
 | `--output-dir DIR` | `runs` | Parent directory for run folders |
 | `--no-query-expansion` | expansion on | Search with the question verbatim only |
 | `-v`, `--verbose` | off | Log requests and errors to stderr (secrets redacted) |
 
-Optional tuning variables: `SCIFORGE_TIMEOUT_SECONDS` (default 20), `SCIFORGE_MAX_RETRIES` (default 2), `SCIFORGE_BACKOFF_SECONDS` (default 1), `SCIFORGE_QUERY_EXPANSION` (default true).
+Optional tuning variables: `SCIFORGE_TIMEOUT_SECONDS` (default 20), `SCIFORGE_MAX_RETRIES` (default 2), `SCIFORGE_BACKOFF_SECONDS` (default 1), `SCIFORGE_QUERY_EXPANSION` (default true), `SCIFORGE_CANDIDATE_POOL_PER_QUERY` (default 10, 1–100).
+
+Retrieval flow: expanded queries (the question verbatim + up to 6 rule-based focused queries) → a larger candidate pool per query and database → unchanged deduplication → deterministic relevance/concept-diversity selection (scored from retrieved titles and query provenance only; no model) → unchanged DOI/PMID verification, backfilling from the ranking when a selected record fails → final set. Details: [`docs/v0.2-retrieval-engine.md`](docs/v0.2-retrieval-engine.md).
+
+Model-layer settings (v0.3 / web Live Mode; environment only, see `.env.example`):
+
+| Variable | Default | Meaning |
+|---|---|---|
+| `SCIFORGE_MODEL_MAX_ATTEMPTS` | 15 | API attempts per investigation (retries included) |
+| `SCIFORGE_MODEL_MAX_SOURCES` | 10 | Sources sent to the model (the web app caps this at its slider, default 5) |
+| `SCIFORGE_MODEL_MAX_INPUT_TOKENS` | 200000 | Cumulative input-token budget per investigation |
+| `SCIFORGE_MODEL_MAX_OUTPUT_TOKENS` | 2000 | Global per-call output cap (fallback for every stage) |
+| `SCIFORGE_MODEL_MAX_OUTPUT_TOKENS_QUESTION` / `_EVIDENCE` / `_GAPS` / `_HYPOTHESES` / `_REPORT` | unset (= global) | Per-stage output caps, 16–128000 (recommended 2000 / 2000 / 4000 / 8000 / 4000) |
+| `SCIFORGE_MODEL_REASONING_EFFORT` | high | `low`, `medium`, `high` or `xhigh`; used by the question stage and any stage without an override |
+| `SCIFORGE_MODEL_REASONING_EFFORT_EVIDENCE` / `_GAPS` / `_HYPOTHESES` / `_REPORT` | unset (= global) | Per-stage reasoning effort (recommended medium / medium / high / medium) |
+| `SCIFORGE_MAX_SPEND_USD` | 15 | Estimated spend cap (`none` disables); needs both prices |
+| `SCIFORGE_MODEL_TIMEOUT_SECONDS` | 120 | Per-request xAI timeout |
+
+Invalid numeric or reasoning-effort values are configuration errors (the run refuses to start); blank per-stage values fall back to the global setting.
 
 Exit codes: `0` run completed (any errors are recorded in the outputs), `2` invalid arguments or configuration, `3` every database search failed (outputs are still written).
 
@@ -101,10 +119,10 @@ Each run writes `runs/<UTC timestamp>/` (for example `runs/20260928T234100Z/`), 
 
 | File | Contents |
 |---|---|
-| `search_log.json` | Every request (database, query, parameters with secrets redacted, timestamp, HTTP status, result count) and every error |
-| `sources.json` | Deduplicated records with provenance and any field conflicts |
+| `search_log.json` | Every request (database, query, parameters with secrets redacted, timestamp, HTTP status, result count) and every error; the query plan with per-query candidate counts, dedup results, and per-candidate selection scores |
+| `sources.json` | Deduplicated records sent to verification, with provenance and any field conflicts |
 | `verification.json` | Per-record verification status with per-identifier, per-field comparison details |
-| `summary.json` | Question, version, start/end times, counts per source, duplicates merged, verification counts, errors, failed databases |
+| `summary.json` | Question, queries used per database, version, start/end times, candidate counts per source and per query, duplicates merged, selection (target, backfill, selected ids and scores), verification counts, errors, failed databases |
 
 Run the tests (offline; no network access needed or allowed):
 
@@ -143,6 +161,7 @@ Architecture, privacy rules, secret configuration and Streamlit Community Cloud 
 - v0.2 retrieves and verifies bibliographic records only. It does not read abstracts or full text, extract evidence, or judge whether a paper supports any claim.
 - Citation verification confirms that a DOI/PMID resolves and that its title, year, and first author match; it cannot confirm that a paper says what anyone claims it says. Records found only in Crossref are verified against Crossref itself.
 - The question is sent verbatim plus a few rule-based focused queries; the concept map is small and hand-curated (currently platelet/shear/lipid-oriented), so for other topics results still depend heavily on wording.
+- Source selection scores candidates from their titles (the only text retrieved at search time) and query provenance; it is a transparent heuristic, not a relevance judgment, and can miss relevant papers with uninformative titles.
 - Later versions will only read what is openly accessible; for paywalled papers they will often have only the abstract, and will label findings accordingly. Reports will be aids to expert judgment, not substitutes for it.
 
 ## License

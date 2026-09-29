@@ -3,6 +3,11 @@
 * ``store`` is always ``false`` (no server-side storage of prompts/outputs).
 * ``previous_response_id`` is never sent: every request carries the full local
   message history, so no server-side conversation state is relied upon.
+* ``reasoning`` = ``{"effort": <low|medium|high|xhigh>}`` is added only when the
+  request carries a reasoning effort (``SCIFORGE_MODEL_REASONING_EFFORT`` and
+  its per-stage overrides). Hidden reasoning in responses (``reasoning`` output
+  items, encrypted reasoning, summaries) is never extracted, returned or
+  logged: only ``output_text`` parts and usage numbers leave this module.
 * Structured output uses ``text.format`` = ``{"type": "json_schema", "name",
   "schema", "strict": true}``.
 * ``complete()`` makes exactly ONE HTTP attempt. Retries (429, 5xx, timeouts,
@@ -55,6 +60,8 @@ def build_request_body(model: str, request: ModelRequest) -> dict[str, Any]:
         "temperature": request.temperature,
         "store": False,  # D1: never store on the provider side
     }
+    if request.reasoning_effort is not None:
+        body["reasoning"] = {"effort": request.reasoning_effort}
     if request.instructions:
         body["instructions"] = request.instructions
     if request.json_schema is not None:

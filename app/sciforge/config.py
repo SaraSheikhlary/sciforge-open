@@ -29,6 +29,12 @@ PUBMED_INTERVAL_WITH_KEY = 0.11
 CROSSREF_INTERVAL_NO_EMAIL = 0.2
 CROSSREF_INTERVAL_WITH_EMAIL = 0.1
 
+# Candidate pool: records requested per expanded query and database before deduplication and selection
+# (SCIFORGE_CANDIDATE_POOL_PER_QUERY). Each query requests max(pool, max_results) records.
+DEFAULT_CANDIDATE_POOL_PER_QUERY = 10
+MIN_CANDIDATE_POOL_PER_QUERY = 1
+MAX_CANDIDATE_POOL_PER_QUERY = 100
+
 
 class ConfigError(ValueError):
     """Raised when an environment variable has an invalid value."""
@@ -84,6 +90,11 @@ class Settings:
         query_expansion: Deterministic rule-based query expansion before
             retrieval (``SCIFORGE_QUERY_EXPANSION``, default true; see
             :mod:`sciforge.query_expansion`). False = question used verbatim only.
+        candidate_pool_per_query: Records requested per expanded query and
+            database before deduplication and deterministic selection
+            (``SCIFORGE_CANDIDATE_POOL_PER_QUERY``, default 10, integer 1-100;
+            invalid values raise :class:`ConfigError`). Each query requests
+            ``max(candidate_pool_per_query, max_results)`` records.
     """
 
     ncbi_api_key: str | None = field(default=None, repr=False)
@@ -92,6 +103,7 @@ class Settings:
     max_retries: int = DEFAULT_MAX_RETRIES
     backoff_seconds: float = DEFAULT_BACKOFF_SECONDS
     query_expansion: bool = True
+    candidate_pool_per_query: int = DEFAULT_CANDIDATE_POOL_PER_QUERY
 
     @classmethod
     def from_env(cls, environ: Mapping[str, str] | None = None) -> Settings:
@@ -107,6 +119,9 @@ class Settings:
             max_retries=_parse_int(env, "SCIFORGE_MAX_RETRIES", DEFAULT_MAX_RETRIES, 0, 5),
             backoff_seconds=_parse_float(env, "SCIFORGE_BACKOFF_SECONDS", DEFAULT_BACKOFF_SECONDS, 0.0, 60.0),
             query_expansion=_parse_bool(env, "SCIFORGE_QUERY_EXPANSION", True),
+            candidate_pool_per_query=_parse_int(env, "SCIFORGE_CANDIDATE_POOL_PER_QUERY",
+                                                DEFAULT_CANDIDATE_POOL_PER_QUERY, MIN_CANDIDATE_POOL_PER_QUERY,
+                                                MAX_CANDIDATE_POOL_PER_QUERY),
         )
 
     @property
@@ -144,8 +159,10 @@ XAI_RESPONSES_PATH = "/v1/responses"
 # D8 budget defaults (per investigation).
 DEFAULT_MODEL_MAX_ATTEMPTS = 15  # every API attempt counts, retries included
 DEFAULT_MODEL_MAX_SOURCES = 10
-DEFAULT_MODEL_MAX_INPUT_TOKENS = 200_000
-DEFAULT_MODEL_MAX_OUTPUT_TOKENS = 2_000
+DEFAULT_MODEL_MAX_INPUT_TOKENS = 200_000   # cumulative input tokens per investigation
+DEFAULT_MODEL_MAX_OUTPUT_TOKENS = 2_000   # global per-call output cap (fallback for every stage)
+MIN_MODEL_MAX_OUTPUT_TOKENS = 16
+MAX_MODEL_MAX_OUTPUT_TOKENS = 128_000
 DEFAULT_MAX_SPEND_USD = 15.0
 # Per-request xAI timeout (SCIFORGE_MODEL_TIMEOUT_SECONDS). Values that are blank, not a number, not finite,
 # <= 0 or above MAX_MODEL_TIMEOUT_SECONDS fall back to the default (never an error, never an unbounded wait).
@@ -153,6 +170,21 @@ DEFAULT_MODEL_TIMEOUT_SECONDS = 120.0
 MAX_MODEL_TIMEOUT_SECONDS = 600.0
 MODEL_TIMEOUT_ENV = "SCIFORGE_MODEL_TIMEOUT_SECONDS"
 MAX_SPEND_DISABLED_WORDS = frozenset({"none"})
+
+# Model stages -> environment-variable suffix. Logical stage names are those of
+# sciforge.llm.client.stage_key ("evidence" is the extraction stage).
+MODEL_STAGES = ("question", "evidence", "gaps", "hypotheses", "report")
+OUTPUT_TOKENS_ENV_PREFIX = "SCIFORGE_MODEL_MAX_OUTPUT_TOKENS_"
+# Per-stage output caps: blank/unset -> global SCIFORGE_MODEL_MAX_OUTPUT_TOKENS; otherwise an integer
+# 16-128000 (anything else is a configuration error, like the global setting).
+OUTPUT_TOKENS_STAGE_ENV = {stage: OUTPUT_TOKENS_ENV_PREFIX + stage.upper() for stage in MODEL_STAGES}
+# Reasoning effort sent to the xAI Responses API as {"reasoning": {"effort": ...}}.
+REASONING_EFFORT_ENV = "SCIFORGE_MODEL_REASONING_EFFORT"
+REASONING_EFFORTS = ("low", "medium", "high", "xhigh")
+DEFAULT_REASONING_EFFORT = "high"
+# The question stage always uses the global value; these stages can override it.
+REASONING_EFFORT_STAGES = ("evidence", "gaps", "hypotheses", "report")
+REASONING_EFFORT_STAGE_ENV = {stage: f"{REASONING_EFFORT_ENV}_{stage.upper()}" for stage in REASONING_EFFORT_STAGES}
 
 ELIGIBILITY_VERIFIED = "verified"
 ELIGIBILITY_VERIFIED_OR_PARTIAL = "verified_or_partial"
@@ -168,6 +200,7 @@ MODEL_ENV_VARS = (
     "SCIFORGE_PRICE_INPUT_PER_MTOK", "SCIFORGE_PRICE_OUTPUT_PER_MTOK",
     "SCIFORGE_MODEL_TIMEOUT_SECONDS", "SCIFORGE_STORE_PROMPTS",
     "SCIFORGE_MODEL_ELIGIBILITY", "SCIFORGE_MODEL_ENTAILMENT",
+    *OUTPUT_TOKENS_STAGE_ENV.values(), REASONING_EFFORT_ENV, *REASONING_EFFORT_STAGE_ENV.values(),
 )
 
 
@@ -199,6 +232,24 @@ def parse_model_timeout(env: Mapping[str, str]) -> float:
         return DEFAULT_MODEL_TIMEOUT_SECONDS
     if not math.isfinite(value) or value <= 0 or value > MAX_MODEL_TIMEOUT_SECONDS:
         return DEFAULT_MODEL_TIMEOUT_SECONDS
+    return value
+
+
+def _parse_optional_int(env: Mapping[str, str], name: str, lo: int, hi: int) -> int | None:
+    """Blank/unset -> None (caller falls back to a global value); otherwise like :func:`_parse_int`."""
+    if _clean(env.get(name)) is None:
+        return None
+    return _parse_int(env, name, 0, lo, hi)
+
+
+def _parse_reasoning_effort(env: Mapping[str, str], name: str, default: str | None) -> str | None:
+    """``low`` / ``medium`` / ``high`` / ``xhigh`` (case-insensitive); blank -> ``default``; else ConfigError."""
+    raw = _clean(env.get(name))
+    if raw is None:
+        return default
+    value = raw.lower()
+    if value not in REASONING_EFFORTS:
+        raise ConfigError(f"{name} must be one of {', '.join(REASONING_EFFORTS)}")
     return value
 
 
@@ -262,9 +313,34 @@ class ModelSettings:
     store_prompts: bool = True
     eligibility: str = ELIGIBILITY_VERIFIED
     entailment: bool = True
+    # Stage-aware output caps (None -> max_output_tokens_per_call) and reasoning effort.
+    max_output_tokens_question: int | None = None
+    max_output_tokens_evidence: int | None = None
+    max_output_tokens_gaps: int | None = None
+    max_output_tokens_hypotheses: int | None = None
+    max_output_tokens_report: int | None = None
+    reasoning_effort: str = DEFAULT_REASONING_EFFORT
+    reasoning_effort_evidence: str | None = None
+    reasoning_effort_gaps: str | None = None
+    reasoning_effort_hypotheses: str | None = None
+    reasoning_effort_report: str | None = None
 
     def __post_init__(self) -> None:
         from sciforge.llm.client import ModelConfigError
+
+        for stage in MODEL_STAGES:
+            value = getattr(self, f"max_output_tokens_{stage}")
+            if value is not None and (isinstance(value, bool) or not isinstance(value, int)
+                                      or not MIN_MODEL_MAX_OUTPUT_TOKENS <= value <= MAX_MODEL_MAX_OUTPUT_TOKENS):
+                raise ModelConfigError(f"{OUTPUT_TOKENS_STAGE_ENV[stage]} must be between "
+                                       f"{MIN_MODEL_MAX_OUTPUT_TOKENS} and {MAX_MODEL_MAX_OUTPUT_TOKENS}")
+        if self.reasoning_effort not in REASONING_EFFORTS:
+            raise ModelConfigError(f"{REASONING_EFFORT_ENV} must be one of {', '.join(REASONING_EFFORTS)}")
+        for stage in REASONING_EFFORT_STAGES:
+            value = getattr(self, f"reasoning_effort_{stage}")
+            if value is not None and value not in REASONING_EFFORTS:
+                raise ModelConfigError(f"{REASONING_EFFORT_STAGE_ENV[stage]} must be one of "
+                                       f"{', '.join(REASONING_EFFORTS)}")
 
         if not self.api_key or not self.api_key.strip():
             raise ModelConfigError("XAI_API_KEY is required for the model layer")
@@ -309,7 +385,14 @@ class ModelSettings:
                 max_input_tokens=_parse_int(env, "SCIFORGE_MODEL_MAX_INPUT_TOKENS", DEFAULT_MODEL_MAX_INPUT_TOKENS,
                                             1_000, 10_000_000),
                 max_output_tokens_per_call=_parse_int(env, "SCIFORGE_MODEL_MAX_OUTPUT_TOKENS",
-                                                      DEFAULT_MODEL_MAX_OUTPUT_TOKENS, 16, 128_000),
+                                                      DEFAULT_MODEL_MAX_OUTPUT_TOKENS, MIN_MODEL_MAX_OUTPUT_TOKENS,
+                                                      MAX_MODEL_MAX_OUTPUT_TOKENS),
+                **{f"max_output_tokens_{stage}": _parse_optional_int(env, name, MIN_MODEL_MAX_OUTPUT_TOKENS,
+                                                                     MAX_MODEL_MAX_OUTPUT_TOKENS)
+                   for stage, name in OUTPUT_TOKENS_STAGE_ENV.items()},
+                reasoning_effort=_parse_reasoning_effort(env, REASONING_EFFORT_ENV, DEFAULT_REASONING_EFFORT),
+                **{f"reasoning_effort_{stage}": _parse_reasoning_effort(env, name, None)
+                   for stage, name in REASONING_EFFORT_STAGE_ENV.items()},
                 max_spend_usd=_parse_spend_cap(env),
                 price_input_per_mtok=_parse_optional_float(env, "SCIFORGE_PRICE_INPUT_PER_MTOK", 0.0, 10_000.0),
                 price_output_per_mtok=_parse_optional_float(env, "SCIFORGE_PRICE_OUTPUT_PER_MTOK", 0.0, 10_000.0),
@@ -344,6 +427,28 @@ class ModelSettings:
         """User-Agent for model requests (no contact email)."""
         return f"SciForge/{__version__} ({PROJECT_URL})"
 
+    def stage_max_output_tokens(self) -> dict[str, int]:
+        """Explicit per-stage output caps (only stages whose override is set)."""
+        return {stage: v for stage in MODEL_STAGES if (v := getattr(self, f"max_output_tokens_{stage}")) is not None}
+
+    def max_output_tokens_for(self, stage: str | None) -> int:
+        """Effective output cap for ``stage``: the stage override if set, else the global value."""
+        from sciforge.llm.client import stage_key
+
+        return self.stage_max_output_tokens().get(stage_key(stage) or "", self.max_output_tokens_per_call)
+
+    def reasoning_effort_for(self, stage: str | None) -> str:
+        """Effective reasoning effort: stage override (not for ``question``), else the global value."""
+        from sciforge.llm.client import stage_key
+
+        key = stage_key(stage)
+        override = getattr(self, f"reasoning_effort_{key}", None) if key in REASONING_EFFORT_STAGES else None
+        return override or self.reasoning_effort
+
+    def reasoning_efforts(self) -> dict[str, str]:
+        """Effective reasoning effort for every model stage (recorded in logs; a setting, not model output)."""
+        return {stage: self.reasoning_effort_for(stage) for stage in MODEL_STAGES}
+
     def budget_limits(self):  # -> sciforge.llm.budget.BudgetLimits
         from sciforge.llm.budget import BudgetLimits
 
@@ -353,6 +458,7 @@ class ModelSettings:
             max_input_tokens=self.max_input_tokens,
             max_output_tokens_per_call=self.max_output_tokens_per_call,
             max_spend_usd=self.max_spend_usd,
+            stage_max_output_tokens=tuple(self.stage_max_output_tokens().items()),
         )
 
     def retry_policy(self):  # -> sciforge.llm.budget.RetryPolicy

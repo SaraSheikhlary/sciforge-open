@@ -3,6 +3,9 @@
 Limits (defaults): 15 API **attempts** (every HTTP attempt counts, including
 retries after 429 / 5xx / timeouts / connection errors), 10 sources, 200,000
 cumulative input tokens, 2,000 output tokens per attempt, and a $15 spend cap.
+The per-attempt output cap can be overridden per model stage
+(``stage_max_output_tokens``; e.g. ``SCIFORGE_MODEL_MAX_OUTPUT_TOKENS_HYPOTHESES``);
+the effective stage value is what is granted, reserved and charged below.
 
 Where the retry loop lives
 --------------------------
@@ -17,7 +20,7 @@ with the previous attempt's error attached (``last_error`` / ``__cause__``).
 Pre-call check (estimates)
 --------------------------
 worst case = pessimistic input estimate (chars/3 + overhead) and the granted
-``max_output_tokens``; worst-case cost = price table applied to both. An
+``max_output_tokens`` (= min(request, effective cap of the request's stage)); worst-case cost = price table applied to both. An
 attempt is refused if ``attempts + 1 + keep_attempts > max_attempts``,
 ``input_used + est_input > max_input_tokens`` or ``spend + worst_cost >
 max_spend_usd``. Once ANY of these limits is reached (by a refusal, or because
@@ -65,6 +68,7 @@ from sciforge.llm.client import (
     ModelRequest,
     ModelResponse,
     ModelUsage,
+    stage_key,
 )
 from sciforge.logging_utils import iso_utc, utc_now
 
@@ -122,25 +126,41 @@ class BudgetLimits:
     max_input_tokens: int = 200_000
     max_output_tokens_per_call: int = 2_000
     max_spend_usd: float | Decimal | None = 15.0  # None = explicitly disabled
+    # Per-stage output caps as ((logical stage, cap), ...); stages not listed use max_output_tokens_per_call.
+    stage_max_output_tokens: tuple[tuple[str, int], ...] = ()
 
     def __post_init__(self) -> None:
         for name in ("max_attempts", "max_sources", "max_input_tokens", "max_output_tokens_per_call"):
             value = getattr(self, name)
             if isinstance(value, bool) or not isinstance(value, int) or value < 1:
                 raise ValueError(f"{name} must be a positive integer")
+        pairs = tuple(sorted(dict(self.stage_max_output_tokens).items()))
+        for stage, value in pairs:
+            if not isinstance(stage, str) or not stage:
+                raise ValueError("stage_max_output_tokens keys must be stage names")
+            if isinstance(value, bool) or not isinstance(value, int) or value < 1:
+                raise ValueError("stage_max_output_tokens values must be positive integers")
+        object.__setattr__(self, "stage_max_output_tokens", pairs)
         cap = _dec(self.max_spend_usd)
         if cap is not None and not cap > 0:
             raise ValueError("max_spend_usd must be > 0, or None to disable the cap")
         object.__setattr__(self, "max_spend_usd", cap)
 
+    def max_output_tokens_for(self, stage: str | None) -> int:
+        """Effective per-attempt output cap for a request stage (``"gaps:repair"`` counts as ``gaps``)."""
+        return dict(self.stage_max_output_tokens).get(stage_key(stage) or "", self.max_output_tokens_per_call)
+
     def to_dict(self) -> dict[str, Any]:
-        return {
+        data: dict[str, Any] = {
             "max_attempts": self.max_attempts,
             "max_sources": self.max_sources,
             "max_input_tokens": self.max_input_tokens,
             "max_output_tokens_per_call": self.max_output_tokens_per_call,
             "max_spend_usd": _dstr(self.max_spend_usd),  # type: ignore[arg-type]
         }
+        if self.stage_max_output_tokens:
+            data["max_output_tokens_by_stage"] = dict(self.stage_max_output_tokens)
+        return data
 
 
 @dataclass(frozen=True)
@@ -233,7 +253,7 @@ class BudgetTracker:
         attempt could exceed a limit, or if a limit was already reached.
         ``keep_attempts`` attempts are kept free for later stages. The returned
         reservation's ``request`` has ``max_output_tokens`` capped at the
-        per-call limit — send that one.
+        effective per-call limit of the request's stage — send that one.
         """
         if keep_attempts < 0:
             raise ValueError("keep_attempts must be >= 0")
@@ -251,7 +271,7 @@ class BudgetTracker:
                                   f"{self.attempts} of {lim.max_attempts} attempts used, "
                                   f"{keep_attempts} kept for later stages", last_error=last_error)
 
-        granted_output = min(request.max_output_tokens, lim.max_output_tokens_per_call)
+        granted_output = min(request.max_output_tokens, lim.max_output_tokens_for(request.stage))
         est_input = estimate_input_tokens(request)
         if self.input_tokens + pending_tokens + est_input > lim.max_input_tokens:
             raise self._stop("max_input_tokens",

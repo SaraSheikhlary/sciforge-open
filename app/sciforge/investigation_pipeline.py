@@ -191,7 +191,8 @@ def run_model_investigation(
     files["report"] = target / "report.md"
     header = {"sciforge_version": __version__, "model_layer": MODEL_LAYER_MILESTONE, "question": question.strip()}
 
-    ctx = CallContext(client=model_client, tracker=tracker, audit=audit, retry=retry, sleep=sleep_fn, now=now)
+    ctx = CallContext(client=model_client, tracker=tracker, audit=audit, retry=retry, sleep=sleep_fn, now=now,
+                      reasoning_efforts=model_settings.reasoning_efforts() if model_settings is not None else {})
     q = base.question
     context = q.definition.model_dump() if q.definition is not None else {"research_question": question.strip()}
     accepted_evidence = list(base.evidence.accepted)
