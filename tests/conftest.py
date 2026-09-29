@@ -46,7 +46,8 @@ def _clean_env(monkeypatch: pytest.MonkeyPatch) -> None:
     from sciforge.config import MODEL_ENV_VARS
 
     for name in ("NCBI_API_KEY", "SCIFORGE_CONTACT_EMAIL", "SCIFORGE_TIMEOUT_SECONDS",
-                 "SCIFORGE_MAX_RETRIES", "SCIFORGE_BACKOFF_SECONDS", "XAI_API_KEY", *MODEL_ENV_VARS,
+                 "SCIFORGE_MAX_RETRIES", "SCIFORGE_BACKOFF_SECONDS", "SCIFORGE_QUERY_EXPANSION", "XAI_API_KEY",
+                 *MODEL_ENV_VARS,
                  "SCIFORGE_LIVE_XAI"):
         monkeypatch.delenv(name, raising=False)
 

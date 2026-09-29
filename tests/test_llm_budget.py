@@ -39,7 +39,7 @@ def usage(inp=100, out=50, **kw):
 
 def test_d8_defaults():
     t = BudgetTracker(BudgetLimits(), PRICES)
-    assert t.summary()["limits"] == {"max_attempts": 30, "max_sources": 10, "max_input_tokens": 200_000,
+    assert t.summary()["limits"] == {"max_attempts": 15, "max_sources": 10, "max_input_tokens": 200_000,
                                      "max_output_tokens_per_call": 2_000, "max_spend_usd": "15"}
     assert BudgetLimits().max_spend_usd == Decimal("15")
 
@@ -247,7 +247,7 @@ def test_summary_shape():
     s = t.summary()
     assert set(s) == {"limits", "used", "remaining", "prices_configured", "spend_cap_enabled",
                       "sources_limited", "exhausted_by"}
-    assert s["used"]["attempts"] == 1 and s["remaining"]["attempts"] == 29
+    assert s["used"]["attempts"] == 1 and s["remaining"]["attempts"] == 14
     assert s["remaining"]["spend_usd"] == "14.9993"
     assert s["used"]["spend_by_cost_source_usd"]["price_estimate"] == "0.0007"
 

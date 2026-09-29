@@ -84,7 +84,9 @@ class XAIClient:
         now: Callable[[], datetime] = utc_now,
     ) -> None:
         self._settings = settings
-        self._http = http if http is not None else httpx.Client(follow_redirects=False)
+        # SCIFORGE_MODEL_TIMEOUT_SECONDS (default 120 s) is the client default AND is passed on every request.
+        self._http = http if http is not None else httpx.Client(follow_redirects=False,
+                                                                timeout=settings.timeout_seconds)
         self._sleep = sleep
         self._clock = clock
         self._now = now

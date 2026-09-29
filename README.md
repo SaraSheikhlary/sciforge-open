@@ -34,7 +34,7 @@ When the evidence is thin, SciForge says so instead of filling the gap.
 
 v0.2 is a **deterministic literature retrieval and citation-verification engine**. No language model is involved. Given a research question, it:
 
-1. **Searches** PubMed (NCBI E-utilities `esearch` + `esummary`) and Crossref (`/works`), the two current retrieval sources. The question is used verbatim as the search query; there is no model-based query generation yet.
+1. **Searches** PubMed (NCBI E-utilities `esearch` + `esummary`) and Crossref (`/works`), the two current retrieval sources. The question itself is always searched, plus up to six focused queries from a deterministic, rule-based expansion (stopwords removed, a small curated concept/synonym map, e.g. "platelet activation" combined with "shear stress", "phosphatidylserine" …). No model is involved and the expansion only produces query strings; results from all queries are merged before the unchanged deduplication and verification. Disable with `--no-query-expansion` or `SCIFORGE_QUERY_EXPANSION=false`.
 2. **Normalizes** each result into a record (title, authors, year, DOI, PMID, journal, source URL, retrieval time). Missing fields stay `null`; nothing is guessed.
 3. **Deduplicates** conservatively: by DOI, then PMID, then only on an exact normalized title + year + first-author match.
 4. **Verifies** every record: the DOI is resolved on Crossref and the PMID on PubMed, and title, year, and first author are compared. Each record is marked `verified`, `partially_verified`, or `not_verified`.
@@ -86,13 +86,14 @@ No API key is required for v0.2. `XAI_API_KEY` is reserved for the model layer i
 
 | Option | Default | Meaning |
 |---|---|---|
-| `question` | required | Research question, used verbatim as the search query |
+| `question` | required | Research question; always searched verbatim, plus rule-based focused queries |
 | `--max-results N` | 20 | Maximum records per source (1–1000) |
 | `--from-year YYYY` / `--to-year YYYY` | none | Inclusive publication-year range (1800–2100; either may be omitted) |
 | `--output-dir DIR` | `runs` | Parent directory for run folders |
+| `--no-query-expansion` | expansion on | Search with the question verbatim only |
 | `-v`, `--verbose` | off | Log requests and errors to stderr (secrets redacted) |
 
-Optional tuning variables: `SCIFORGE_TIMEOUT_SECONDS` (default 20), `SCIFORGE_MAX_RETRIES` (default 2), `SCIFORGE_BACKOFF_SECONDS` (default 1).
+Optional tuning variables: `SCIFORGE_TIMEOUT_SECONDS` (default 20), `SCIFORGE_MAX_RETRIES` (default 2), `SCIFORGE_BACKOFF_SECONDS` (default 1), `SCIFORGE_QUERY_EXPANSION` (default true).
 
 Exit codes: `0` run completed (any errors are recorded in the outputs), `2` invalid arguments or configuration, `3` every database search failed (outputs are still written).
 
@@ -141,7 +142,7 @@ Architecture, privacy rules, secret configuration and Streamlit Community Cloud 
 
 - v0.2 retrieves and verifies bibliographic records only. It does not read abstracts or full text, extract evidence, or judge whether a paper supports any claim.
 - Citation verification confirms that a DOI/PMID resolves and that its title, year, and first author match; it cannot confirm that a paper says what anyone claims it says. Records found only in Crossref are verified against Crossref itself.
-- The question is sent verbatim as the query, so results depend heavily on wording.
+- The question is sent verbatim plus a few rule-based focused queries; the concept map is small and hand-curated (currently platelet/shear/lipid-oriented), so for other topics results still depend heavily on wording.
 - Later versions will only read what is openly accessible; for paywalled papers they will often have only the abstract, and will label findings accordingly. Reports will be aids to expert judgment, not substitutes for it.
 
 ## License

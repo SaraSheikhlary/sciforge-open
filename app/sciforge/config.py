@@ -7,6 +7,7 @@ object.
 
 from __future__ import annotations
 
+import math
 import os
 from collections.abc import Mapping
 from dataclasses import dataclass, field
@@ -80,6 +81,9 @@ class Settings:
             connection errors (``SCIFORGE_MAX_RETRIES``).
         backoff_seconds: Base for exponential backoff between retries
             (``SCIFORGE_BACKOFF_SECONDS``).
+        query_expansion: Deterministic rule-based query expansion before
+            retrieval (``SCIFORGE_QUERY_EXPANSION``, default true; see
+            :mod:`sciforge.query_expansion`). False = question used verbatim only.
     """
 
     ncbi_api_key: str | None = field(default=None, repr=False)
@@ -87,6 +91,7 @@ class Settings:
     timeout_seconds: float = DEFAULT_TIMEOUT_SECONDS
     max_retries: int = DEFAULT_MAX_RETRIES
     backoff_seconds: float = DEFAULT_BACKOFF_SECONDS
+    query_expansion: bool = True
 
     @classmethod
     def from_env(cls, environ: Mapping[str, str] | None = None) -> Settings:
@@ -101,6 +106,7 @@ class Settings:
             timeout_seconds=_parse_float(env, "SCIFORGE_TIMEOUT_SECONDS", DEFAULT_TIMEOUT_SECONDS, 0.1, 300.0),
             max_retries=_parse_int(env, "SCIFORGE_MAX_RETRIES", DEFAULT_MAX_RETRIES, 0, 5),
             backoff_seconds=_parse_float(env, "SCIFORGE_BACKOFF_SECONDS", DEFAULT_BACKOFF_SECONDS, 0.0, 60.0),
+            query_expansion=_parse_bool(env, "SCIFORGE_QUERY_EXPANSION", True),
         )
 
     @property
@@ -136,12 +142,16 @@ DEFAULT_XAI_BASE_URL = "https://api.x.ai"
 XAI_RESPONSES_PATH = "/v1/responses"
 
 # D8 budget defaults (per investigation).
-DEFAULT_MODEL_MAX_ATTEMPTS = 30  # every API attempt counts, retries included
+DEFAULT_MODEL_MAX_ATTEMPTS = 15  # every API attempt counts, retries included
 DEFAULT_MODEL_MAX_SOURCES = 10
 DEFAULT_MODEL_MAX_INPUT_TOKENS = 200_000
 DEFAULT_MODEL_MAX_OUTPUT_TOKENS = 2_000
 DEFAULT_MAX_SPEND_USD = 15.0
-DEFAULT_MODEL_TIMEOUT_SECONDS = 60.0
+# Per-request xAI timeout (SCIFORGE_MODEL_TIMEOUT_SECONDS). Values that are blank, not a number, not finite,
+# <= 0 or above MAX_MODEL_TIMEOUT_SECONDS fall back to the default (never an error, never an unbounded wait).
+DEFAULT_MODEL_TIMEOUT_SECONDS = 120.0
+MAX_MODEL_TIMEOUT_SECONDS = 600.0
+MODEL_TIMEOUT_ENV = "SCIFORGE_MODEL_TIMEOUT_SECONDS"
 MAX_SPEND_DISABLED_WORDS = frozenset({"none"})
 
 ELIGIBILITY_VERIFIED = "verified"
@@ -171,6 +181,25 @@ def _parse_bool(env: Mapping[str, str], name: str, default: bool) -> bool:
     if lowered in _FALSE:
         return False
     raise ConfigError(f"{name} must be one of 1/0/true/false/yes/no/on/off")
+
+
+def parse_model_timeout(env: Mapping[str, str]) -> float:
+    """``SCIFORGE_MODEL_TIMEOUT_SECONDS``: positive finite seconds, at most 600; default 120.
+
+    Unlike other settings this one never raises: blank, non-numeric, non-finite (nan/inf), non-positive
+    or > 600 values fall back to the 120 s default, so a typo can neither break a run nor disable the
+    timeout. The raw value is never logged or echoed.
+    """
+    raw = _clean(env.get(MODEL_TIMEOUT_ENV))
+    if raw is None:
+        return DEFAULT_MODEL_TIMEOUT_SECONDS
+    try:
+        value = float(raw)
+    except ValueError:
+        return DEFAULT_MODEL_TIMEOUT_SECONDS
+    if not math.isfinite(value) or value <= 0 or value > MAX_MODEL_TIMEOUT_SECONDS:
+        return DEFAULT_MODEL_TIMEOUT_SECONDS
+    return value
 
 
 def _parse_optional_float(env: Mapping[str, str], name: str, lo: float, hi: float) -> float | None:
@@ -284,8 +313,7 @@ class ModelSettings:
                 max_spend_usd=_parse_spend_cap(env),
                 price_input_per_mtok=_parse_optional_float(env, "SCIFORGE_PRICE_INPUT_PER_MTOK", 0.0, 10_000.0),
                 price_output_per_mtok=_parse_optional_float(env, "SCIFORGE_PRICE_OUTPUT_PER_MTOK", 0.0, 10_000.0),
-                timeout_seconds=_parse_float(env, "SCIFORGE_MODEL_TIMEOUT_SECONDS", DEFAULT_MODEL_TIMEOUT_SECONDS,
-                                             1.0, 600.0),
+                timeout_seconds=parse_model_timeout(env),
                 max_retries=_parse_int(env, "SCIFORGE_MAX_RETRIES", DEFAULT_MAX_RETRIES, 0, 5),
                 backoff_seconds=_parse_float(env, "SCIFORGE_BACKOFF_SECONDS", DEFAULT_BACKOFF_SECONDS, 0.0, 60.0),
                 store_prompts=_parse_bool(env, "SCIFORGE_STORE_PROMPTS", True),

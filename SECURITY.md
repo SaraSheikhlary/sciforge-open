@@ -33,7 +33,7 @@ Rules for contributors:
 
 ## Data handling
 
-- SciForge queries public bibliographic services (in v0.2: PubMed and Crossref). Research questions are sent to those services verbatim as search queries; from the planned model layer onward they will also be sent to the model provider. Do not enter confidential or unpublished information into SciForge.
+- SciForge queries public bibliographic services (in v0.2: PubMed and Crossref). Research questions are sent to those services verbatim as search queries (plus rule-based focused queries built from their keywords); from the planned model layer onward they will also be sent to the model provider. Do not enter confidential or unpublished information into SciForge.
 - Generated reports are saved locally and are not uploaded anywhere by SciForge.
 
 ## Supported versions

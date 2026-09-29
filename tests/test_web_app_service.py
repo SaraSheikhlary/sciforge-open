@@ -385,7 +385,7 @@ def test_live_mode_wiring_offline_with_fake_model_and_mock_transport(tmp_path, m
         svc.InvestigationRequest(question=DEMO_QUESTION, mode=svc.MODE_LIVE, max_sources=3), environ=env,
         live_http_client=mock_client(_live_handler), live_model_client_factory=factory, sleep=Sleeper())
     assert result.ok and not result.demo and result.status == "degraded"
-    assert seen == {"max_sources": 3, "max_attempts": 30}           # UI cap applied within the existing budget
+    assert seen == {"max_sources": 3, "max_attempts": 15}           # UI cap applied within the existing budget
     assert "not been validated against the real xAI API" in result.notices[0]
     text = result.displayed_text()
     assert FAKE_XAI_KEY not in text and "/home/someone" not in text

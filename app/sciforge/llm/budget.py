@@ -1,6 +1,6 @@
 """Per-investigation budget accounting for model API attempts (decision D8).
 
-Limits (defaults): 30 API **attempts** (every HTTP attempt counts, including
+Limits (defaults): 15 API **attempts** (every HTTP attempt counts, including
 retries after 429 / 5xx / timeouts / connection errors), 10 sources, 200,000
 cumulative input tokens, 2,000 output tokens per attempt, and a $15 spend cap.
 
@@ -117,7 +117,7 @@ class PriceTable:
 
 @dataclass(frozen=True)
 class BudgetLimits:
-    max_attempts: int = 30
+    max_attempts: int = 15
     max_sources: int = 10
     max_input_tokens: int = 200_000
     max_output_tokens_per_call: int = 2_000

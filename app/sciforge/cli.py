@@ -62,6 +62,9 @@ def build_parser() -> argparse.ArgumentParser:
     inv.add_argument("--from-year", type=_year, default=None, help="earliest publication year (inclusive)")
     inv.add_argument("--to-year", type=_year, default=None, help="latest publication year (inclusive)")
     inv.add_argument("--output-dir", default="runs", help="directory for run outputs (default: runs/)")
+    inv.add_argument("--no-query-expansion", action="store_true",
+                     help="search only the question verbatim (disable deterministic query expansion; "
+                          "same as SCIFORGE_QUERY_EXPANSION=false)")
     inv.add_argument("-v", "--verbose", action="store_true", help="log requests and errors to stderr")
     return parser
 
@@ -126,6 +129,7 @@ def main(argv: Sequence[str] | None = None, *, client: httpx.Client | None = Non
         output_dir=args.output_dir,
         settings=settings,
         client=client,
+        query_expansion=False if args.no_query_expansion else None,
     )
     print(format_summary(result.summary, str(result.run_dir)))
     if len(result.summary["failed_databases"]) == len(result.summary["databases_queried"]):

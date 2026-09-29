@@ -1,7 +1,13 @@
-"""Orchestrates one v0.2 investigation: search -> dedup -> verify -> write files.
+"""Orchestrates one v0.2 investigation: expand queries -> search -> merge -> dedup -> verify -> write files.
 
-The research question is used verbatim as the search query (no model-based
-query generation in v0.2).
+Query plan (:mod:`sciforge.query_expansion`, deterministic, no model): the
+research question verbatim (always the first query, exactly as before) plus,
+unless disabled (``SCIFORGE_QUERY_EXPANSION=false`` / ``query_expansion=False``),
+focused anchor×facet queries from a curated concept map. Every query is run on
+PubMed and Crossref; per database the hits are merged (identical hits kept once,
+at most ``max_results``), then the unchanged v0.2 dedup and verification run.
+The plan and per-query result counts are written to ``search_log.json`` and
+``summary.json`` (``query_expansion``).
 """
 
 from __future__ import annotations
@@ -25,6 +31,7 @@ from sciforge.http_utils import HttpFetcher, Sleep
 from sciforge.logging_utils import RunLog, iso_utc, redact_text, run_stamp, utc_now
 from sciforge.models import ErrorEntry, Record, SearchOutcome, VerificationResult
 from sciforge.pubmed import PubMedClient
+from sciforge.query_expansion import QueryPlan, expand_queries, merge_query_outcomes, single_query_plan
 from sciforge.verify import JOURNAL_SIMILARITY_THRESHOLD, TITLE_SIMILARITY_THRESHOLD, Verifier
 
 DATABASES = ("pubmed", "crossref")
@@ -77,16 +84,22 @@ def run_investigation(
     client: httpx.Client | None = None,
     sleep: Sleep | None = None,
     now: Callable[[], datetime] = utc_now,
+    query_expansion: bool | None = None,
 ) -> InvestigationResult:
     """Run a full retrieve-and-verify investigation and write output files.
 
     Never raises for network or API problems; they are recorded in the logs.
     ``sleep`` defaults to :func:`time.sleep`, looked up at call time.
+    ``query_expansion`` defaults to ``settings.query_expansion`` (env
+    ``SCIFORGE_QUERY_EXPANSION``, default true). ``max_results`` caps the merged
+    records per database (each query also requests at most ``max_results``).
     """
     query = question.strip()
     if not query:
         raise ValueError("research question must not be empty")
     settings = settings or Settings.from_env()
+    expand = settings.query_expansion if query_expansion is None else query_expansion
+    plan: QueryPlan = expand_queries(query) if expand else single_query_plan(query)
     started = now()
     run_dir = make_run_dir(Path(output_dir), started)
     run_log = RunLog(settings.secret_values())
@@ -98,10 +111,19 @@ def run_investigation(
         pubmed = PubMedClient(fetcher, settings)
         crossref = CrossrefClient(fetcher, settings)
 
-        outcomes = [
-            _safe_search(lambda: pubmed.search(query, max_results, from_year, to_year), "pubmed", query, run_log),
-            _safe_search(lambda: crossref.search(query, max_results, from_year, to_year), "crossref", query, run_log),
-        ]
+        per_query: dict[str, list[SearchOutcome]] = {"pubmed": [], "crossref": []}
+        for pq in plan.queries:
+            per_query["pubmed"].append(_safe_search(
+                lambda: pubmed.search(pq.pubmed, max_results, from_year, to_year), "pubmed", pq.pubmed, run_log))
+            per_query["crossref"].append(_safe_search(
+                lambda: crossref.search(pq.crossref, max_results, from_year, to_year), "crossref", pq.crossref,
+                run_log))
+        outcomes = []
+        query_stats: dict[str, list[dict[str, Any]]] = {}
+        for database in DATABASES:
+            merged_outcome, stats = merge_query_outcomes(database, per_query[database], max_results)
+            outcomes.append(merged_outcome)
+            query_stats[database] = stats
         retrieved = [r for o in outcomes for r in o.records]
         unique, merged = deduplicate(retrieved)
         try:
@@ -117,9 +139,23 @@ def run_investigation(
     finished = now()
     params = {"max_results_per_source": max_results, "from_year": from_year, "to_year": to_year}
     summary = build_summary(query, params, started, finished, outcomes, retrieved, unique, merged, verification, run_log)
+    expansion_log = _expansion_log(plan, query_stats)
+    if plan.enabled and len(plan.queries) > 1:
+        summary["query_generation"] = (f"deterministic rule-based expansion (no model): the question verbatim plus "
+                                       f"{len(plan.queries) - 1} focused queries; see query_expansion")
+    summary["query_expansion"] = expansion_log
     summary["run_directory"] = run_dir.name
-    write_outputs(run_dir, query, params, summary, unique, verification, run_log, settings.secret_values())
+    write_outputs(run_dir, query, params, summary, unique, verification, run_log, settings.secret_values(),
+                  query_expansion=expansion_log)
     return InvestigationResult(run_dir=run_dir, summary=summary, records=unique, verification=verification)
+
+
+def _expansion_log(plan: QueryPlan, stats: dict[str, list[dict[str, Any]]]) -> dict[str, Any]:
+    """Query plan + per-query, per-database result counts (for search_log.json / summary.json)."""
+    payload = plan.to_json()
+    for i, q in enumerate(payload["queries"]):
+        q["results"] = {db: stats[db][i] for db in stats if i < len(stats[db])}
+    return payload
 
 
 def build_summary(
@@ -168,6 +204,7 @@ def write_outputs(
     verification: list[VerificationResult],
     run_log: RunLog,
     secrets: list[str],
+    query_expansion: dict[str, Any] | None = None,
 ) -> None:
     """Write search_log.json, sources.json, verification.json, summary.json."""
     _write_json(run_dir / "search_log.json", {
@@ -175,6 +212,7 @@ def write_outputs(
         "question": query,
         "parameters": params,
         "note": "Sensitive parameters (api_key, email, mailto) are redacted.",
+        **({"query_expansion": query_expansion} if query_expansion is not None else {}),
         "requests": [e.model_dump() for e in run_log.entries],
         "errors": [e.model_dump() for e in run_log.errors],
     }, secrets)

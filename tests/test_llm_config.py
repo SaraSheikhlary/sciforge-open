@@ -11,7 +11,7 @@ from sciforge.llm.client import ModelConfigError
 def test_defaults_match_d8():
     s = ModelSettings.from_env(model_env(SCIFORGE_MAX_SPEND_USD=None,
                                          SCIFORGE_PRICE_INPUT_PER_MTOK="1", SCIFORGE_PRICE_OUTPUT_PER_MTOK="2"))
-    assert s.max_attempts == 30                      # every API attempt counts (retries included)
+    assert s.max_attempts == 15                      # every API attempt counts (retries included)
     assert s.max_sources == 10
     assert s.max_input_tokens == 200_000
     assert s.max_output_tokens_per_call == 2_000
@@ -22,7 +22,7 @@ def test_defaults_match_d8():
     assert s.entailment is True                      # D4
     assert s.eligibility == "verified" and not s.include_partially_verified  # D2
     assert s.budget_limits() == BudgetLimits()
-    assert BudgetLimits() == BudgetLimits(30, 10, 200_000, 2_000, 15.0)
+    assert BudgetLimits() == BudgetLimits(15, 10, 200_000, 2_000, 15.0)
     assert s.retry_policy().max_retries == 2 and s.retry_policy().backoff_seconds == 1.0
 
 
@@ -101,7 +101,7 @@ def test_prices_and_custom_limits_parsed():
 @pytest.mark.parametrize("name,value", [
     ("SCIFORGE_MODEL_MAX_ATTEMPTS", "0"), ("SCIFORGE_MODEL_MAX_ATTEMPTS", "x"), ("SCIFORGE_MODEL_MAX_SOURCES", "101"),
     ("SCIFORGE_MODEL_MAX_INPUT_TOKENS", "10"), ("SCIFORGE_MODEL_MAX_OUTPUT_TOKENS", "1"),
-    ("SCIFORGE_PRICE_INPUT_PER_MTOK", "-1"), ("SCIFORGE_MODEL_TIMEOUT_SECONDS", "0"),
+    ("SCIFORGE_PRICE_INPUT_PER_MTOK", "-1"),
     ("SCIFORGE_STORE_PROMPTS", "maybe"), ("SCIFORGE_MODEL_ENTAILMENT", "2"),
     ("SCIFORGE_MODEL_ELIGIBILITY", "partial"),
 ])

@@ -18,6 +18,10 @@ from conftest import (
     mock_client,
 )
 from sciforge.pipeline import run_investigation
+from sciforge.query_expansion import expand_queries
+
+# "platelet shear activation" expands to the verbatim question + 2 focused queries (run on both databases)
+N_QUERIES = len(expand_queries("platelet shear activation").queries)
 
 FIXED = datetime(2026, 9, 28, 23, 41, 0, tzinfo=timezone.utc)
 
@@ -79,7 +83,8 @@ def test_happy_path_outputs(tmp_path, settings):
 
     log = json.loads((result.run_dir / "search_log.json").read_text())
     stages = [e["stage"] for e in log["requests"]]
-    assert stages.count("search") == 2 and "summary" in stages and "verification" in stages
+    assert N_QUERIES == 3
+    assert stages.count("search") == 2 * N_QUERIES and "summary" in stages and "verification" in stages
 
 
 def test_secrets_never_written(tmp_path, settings):
@@ -96,7 +101,7 @@ def test_all_sources_down_does_not_crash(tmp_path, settings):
     result = run(tmp_path, handler, settings)
     s = result.summary
     assert s["failed_databases"] == ["pubmed", "crossref"]
-    assert s["unique_records"] == 0 and s["errors_count"] == 2
+    assert s["unique_records"] == 0 and s["errors_count"] == 2 * N_QUERIES
     log = json.loads((result.run_dir / "search_log.json").read_text())
     assert {e["error_type"] for e in log["errors"]} == {"connection_error"}
     for err in log["errors"]:
