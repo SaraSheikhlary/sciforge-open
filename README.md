@@ -45,6 +45,7 @@ It produces no conclusions, evidence matrix, or report yet. Full details: [`docs
 | Path | Contents |
 |---|---|
 | `app/sciforge/` | The Python package: `cli.py`, `pipeline.py`, `pubmed.py`, `crossref.py`, `dedup.py`, `verify.py`, `normalize.py`, `models.py`, `http_utils.py`, `logging_utils.py`, `config.py` |
+| `streamlit_app.py` | Web app (Streamlit): thin UI over `app/sciforge/app_service.py`; see [`docs/web-app.md`](docs/web-app.md) |
 | `tests/` | Offline pytest suite (HTTP mocked with `httpx.MockTransport`; real network access is blocked) |
 | `docs/v0.2-retrieval-engine.md` | v0.2 architecture, data flow, configuration, output files, dedup and verification rules, limitations |
 | `docs/product_spec.md`, `docs/architecture.md` | Product specification and full planned architecture |
@@ -111,6 +112,30 @@ pytest -q
 ```
 
 Never commit an API key. See [SECURITY.md](SECURITY.md).
+
+## Web app (demo)
+
+A Streamlit web interface ("SciForge — AI for Scientific Discovery") runs the v0.3 pipeline behind a
+simple form: research question, optional year range, maximum sources, and Demo/Live mode, with progress
+steps and tabs for Overview, Evidence, Conflicts, Research Gaps, Hypotheses, Sources and Validation.
+
+```bash
+pip install -e ".[web]"
+streamlit run streamlit_app.py
+```
+
+- **Demo Mode (default)** works offline with no API key. It runs one bundled example investigation on
+  clearly labelled **synthetic** records (fake `10.0000/demo.*` DOIs, `[SYNTHETIC DEMO]` titles) with a
+  scripted fake model. Nothing it shows is a real finding.
+- **Live Mode** is off by default. It is enabled only when the deployment gate
+  `SCIFORGE_LIVE_ENABLED=true` is set **and** both `XAI_API_KEY` and `XAI_MODEL` are configured
+  (environment variables, or Streamlit secrets as a fallback; environment wins). Any other gate value keeps
+  it disabled, and the service refuses gated-off live requests itself. It uses the existing xAI client and
+  budgets. **Live
+  Mode is untested with a real key and has not been validated live.**
+
+Architecture, privacy rules, secret configuration and Streamlit Community Cloud deployment:
+[`docs/web-app.md`](docs/web-app.md).
 
 ## Limitations to keep in mind
 

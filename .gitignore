@@ -5,6 +5,7 @@
 *.pem
 *.key
 secrets/
+.streamlit/secrets.toml
 
 # SciForge run outputs (may contain query logs and model responses)
 runs/

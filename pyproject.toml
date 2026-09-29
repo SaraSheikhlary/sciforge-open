@@ -17,6 +17,7 @@ dependencies = [
 
 [project.optional-dependencies]
 dev = ["pytest>=7.4"]
+web = ["streamlit>=1.50,<2"]
 
 [project.scripts]
 sciforge = "sciforge.cli:main"

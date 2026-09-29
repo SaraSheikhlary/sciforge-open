@@ -1,0 +1,13 @@
+# SciForge web app: Streamlit settings (no secrets here).
+
+[browser]
+# Do not send usage statistics to Streamlit.
+gatherUsageStats = false
+
+[client]
+# Never show tracebacks, exception messages or file paths in the browser (they go to the server console only).
+showErrorDetails = "none"
+toolbarMode = "minimal"
+
+[server]
+headless = true

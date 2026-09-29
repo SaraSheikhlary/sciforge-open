@@ -1,0 +1,3 @@
+# Streamlit Community Cloud installs this file from the repository root.
+# It installs the sciforge package (from app/, see pyproject.toml) with the "web" extra.
+.[web]
