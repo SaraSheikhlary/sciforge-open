@@ -3,13 +3,15 @@
 ``find_leaks(run_dir, needles)`` byte-searches EVERY file in the run directory
 except the opt-in ``debug/`` subdirectory — ``source_texts.json``,
 ``question.json``, ``evidence.json``, ``model_calls.json`` and any file added
-later (e.g. ``report.md``). Each needle is searched as UTF-8 and in its
-JSON-escaped form. Used by tests; cheap enough to run after a real run too.
+later (e.g. ``report.md``). Each needle is searched as UTF-8, in its
+JSON-escaped form and (M3, for report.md) in its Markdown-escaped form. Used by
+tests; cheap enough to run after a real run too.
 """
 
 from __future__ import annotations
 
 import json
+import re
 from collections.abc import Iterable
 from pathlib import Path
 from typing import Any
@@ -25,7 +27,9 @@ def normal_output_files(run_dir: str | Path) -> list[Path]:
 
 def _forms(needle: str) -> set[bytes]:
     return {needle.encode("utf-8"), json.dumps(needle)[1:-1].encode("utf-8"),
-            json.dumps(needle, ensure_ascii=False)[1:-1].encode("utf-8")}
+            json.dumps(needle, ensure_ascii=False)[1:-1].encode("utf-8"),
+            # M3: report.md escapes Markdown characters, so also look for the escaped form
+            re.sub(r"([\\`*_\[\]|<>#])", r"\\\1", needle).encode("utf-8")}
 
 
 def find_leaks(run_dir: str | Path, needles: Iterable[str]) -> list[tuple[str, str]]:
