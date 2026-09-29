@@ -24,11 +24,14 @@ REJECTED_DEMO_STRINGS = ("DEMO-REJECTED-CLAIM", "DEMO-REJECTED-QUOTE",
 
 @pytest.fixture(autouse=True)
 def _clean(monkeypatch: pytest.MonkeyPatch) -> None:
-    for name in ("SCIFORGE_DEBUG_KEEP_REJECTED_RAW", "SCIFORGE_MAX_SOURCE_CHARS", "SCIFORGE_LIVE_ENABLED"):
+    for name in ("SCIFORGE_DEBUG_KEEP_REJECTED_RAW", "SCIFORGE_MAX_SOURCE_CHARS", "SCIFORGE_LIVE_ENABLED",
+                 "SCIFORGE_LIVE_REQUIRE_AUTH", "SCIFORGE_LIVE_ALLOWED_EMAILS"):
         monkeypatch.delenv(name, raising=False)
 
 
-GATE = {"SCIFORGE_LIVE_ENABLED": "true"}
+# Gate/credential tests opt out of the sign-in layer explicitly (it has its own tests in test_live_auth.py).
+NOAUTH = {"SCIFORGE_LIVE_REQUIRE_AUTH": "false"}
+GATE = {"SCIFORGE_LIVE_ENABLED": "true", **NOAUTH}
 CREDS = {"XAI_API_KEY": FAKE_XAI_KEY, "XAI_MODEL": FAKE_XAI_MODEL}
 
 
@@ -118,13 +121,19 @@ def test_demo_mode_end_to_end_offline():
     assert [e["source_ref"] for e in result.evidence] == ["S1", "S2", "S3"]
     assert [c["evidence_id"] for c in result.conflicts] == ["ev_0003"]
     assert [g["gap_id"] for g in result.gaps] == ["gap_01", "gap_02"]
-    assert [h["hypothesis_id"] for h in result.hypotheses] == ["hyp_01"]
-    assert all(h["label"] == "hypothesis" for h in result.hypotheses)
+    assert [h["hypothesis_id"] for h in result.hypotheses] == ["hyp_01", "hyp_02"]
+    assert all(h["label"] == "Unvalidated, AI-generated hypothesis for further investigation"
+               for h in result.hypotheses)
+    # v0.4 stress test in Demo Mode: hyp_01 passes the critic; hyp_02 over-claims causality, is revised
+    assert [(h["critic_status"], h["revision_status"]) for h in result.hypotheses] == [
+        ("completed", "no revision required"), ("completed", "revised")]
+    assert [h["mechanistic_claim_level"] for h in result.hypotheses] == ["association", "association"]
+    assert [h["confidence"] for h in result.hypotheses] == ["low", "low"]
     v = result.validation
     assert v["report_status"] == "passed" and v["citations"] == {"resolved": 3, "unresolved": 0}
     assert v["evidence"] == {"accepted": 3, "rejected": 1, "rejection_reasons": {"quote_not_in_source": 1}}
     assert v["privacy_guard"]["rejected_output_leaks_in_run_files"] == 0
-    assert v["budget"]["attempts_used"] == 7 and v["budget"]["sources_limit"] == svc.DEFAULT_MAX_SOURCES
+    assert v["budget"]["attempts_used"] == 9 and v["budget"]["sources_limit"] == svc.DEFAULT_MAX_SOURCES
     assert result.progress == {k: "done" for k, _ in svc.PROGRESS_STAGES}
     assert {e.stage for e in events} == {k for k, _ in svc.PROGRESS_STAGES}
     assert any("DEMO MODE" in item and "SYNTHETIC" in item for item in result.limitations)
@@ -200,7 +209,9 @@ def test_citations_come_only_from_the_deterministic_renderer():
     assert [s["verification_status"] for s in result.sources] == ["verified"] * 3 + ["partially_verified",
                                                                                        "not_verified"]
     # section J of the report lists exactly the cited citation lines
-    assert result.sections["J. Sources"].splitlines() == [s["citation"] for s in result.sources if s["cited"]]
+    j = result.sections["J. Sources"].splitlines()
+    assert j[0].startswith("Each source starts with its source type") and j[1] == ""
+    assert j[2:] == [s["citation"] for s in result.sources if s["cited"]]
 
 
 def test_render_sources_unresolved_placeholder_and_determinism():
@@ -224,7 +235,7 @@ def test_report_sections_split_matches_report():
     result = demo()
     for title, body in result.sections.items():
         assert f"## {title}" in result.report_markdown and body in result.report_markdown
-    assert "Hypothesis:" in result.sections["H. Candidate Hypotheses"]
+    assert "**Candidate hypothesis:**" in result.sections["H. Candidate Hypotheses"]
     assert "report_validation.json" not in result.sections["J. Sources"]
 
 
@@ -252,7 +263,7 @@ def test_live_mode_disabled_with_credentials_when_flag_not_true(flag):
 
 @pytest.mark.parametrize("flag", ["true", "TRUE", "True", "  true  ", "\ttrue\n"])
 def test_live_mode_enabled_only_with_true_flag_and_both_credentials(flag):
-    av = svc.live_availability(environ={**CREDS, "SCIFORGE_LIVE_ENABLED": flag})
+    av = svc.live_availability(environ={**CREDS, **NOAUTH, "SCIFORGE_LIVE_ENABLED": flag})
     assert av.available and av.gate_enabled and av.missing == ()
     assert FAKE_XAI_KEY not in av.message
 
@@ -277,9 +288,9 @@ def test_gate_and_credentials_from_secrets_with_env_precedence():
     # a non-empty environment value always wins over st.secrets, for the gate too
     assert not svc.live_availability(environ={"SCIFORGE_LIVE_ENABLED": "false"}, secrets={**GATE, **CREDS}).available
     assert svc.live_availability(environ={"SCIFORGE_LIVE_ENABLED": "true"},
-                                 secrets={"SCIFORGE_LIVE_ENABLED": "false", **CREDS}).available
+                                 secrets={"SCIFORGE_LIVE_ENABLED": "false", **NOAUTH, **CREDS}).available
     # TOML booleans are not the exact string "true": fail closed
-    assert not svc.live_availability(environ={}, secrets={"SCIFORGE_LIVE_ENABLED": True, **CREDS}).available
+    assert not svc.live_availability(environ={}, secrets={"SCIFORGE_LIVE_ENABLED": True, **NOAUTH, **CREDS}).available
     env = svc._model_env({"XAI_MODEL": "env-model"}, {"XAI_MODEL": "secret-model", "XAI_API_KEY": "k" * 20})
     assert env["XAI_MODEL"] == "env-model" and env["XAI_API_KEY"] == "k" * 20
 
@@ -386,11 +397,14 @@ def test_live_mode_wiring_offline_with_fake_model_and_mock_transport(tmp_path, m
         live_http_client=mock_client(_live_handler), live_model_client_factory=factory, sleep=Sleeper())
     assert result.ok and not result.demo and result.status == "degraded"
     assert seen == {"max_sources": 3, "max_attempts": 15}           # UI cap applied within the existing budget
-    assert "not been validated against the real xAI API" in result.notices[0]
+    assert "real xAI calls (costs money)" in result.notices[0]
     text = result.displayed_text()
     assert FAKE_XAI_KEY not in text and "/home/someone" not in text
     assert "[REDACTED]" in json.dumps(result.question_definition) and "[path]" in json.dumps(result.question_definition)
     assert all(s["citation"] for s in result.sources)
+    # v0.4: the Live path also builds the deterministic evidence graph (empty here: no evidence accepted)
+    assert result.evidence_graph["graph_version"] == "v0.4-evidence-graph-1"
+    assert result.validation["evidence_graph"]["status"] == "passed" and result.evidence_graph["nodes"] == []
     assert list(tmp_path.iterdir()) == []
 
 

@@ -1,4 +1,5 @@
-"""v0.3 model investigation (Milestone 3): M2 pipeline → gaps → hypotheses → report.
+"""v0.3 model investigation (Milestone 3) + v0.4 hypothesis engine: M2 pipeline → gaps → hypotheses
+(generation → critic → revision) → report.
 
 "V0.2 remains the authority for source identity. V0.3 can interpret verified
 sources, but it cannot create citations."
@@ -7,7 +8,8 @@ sources, but it cannot create citations."
 (S0 source texts → S1 question → S2 extraction + validation, unchanged) and then
 runs, sharing the same BudgetTracker, RetryPolicy and M1 ModelCallAudit:
 
-* S4a gaps (``gaps.json``), S4b hypotheses (``hypotheses.json``),
+* S4a gaps (``gaps.json``), S4b hypotheses (``hypotheses.json``; v0.4 engine: generation, a separate
+  critic call and, only when needed, one revision call — :mod:`sciforge.stages.hypotheses`),
 * S5 report narrative + deterministic template (``report.md``, ``report_validation.json``).
 
 Privacy (same rules as M2): rejected gaps / hypotheses / paragraphs are stored as
@@ -32,6 +34,7 @@ from typing import Any
 
 from sciforge import __version__
 from sciforge.config import ModelSettings, Settings
+from sciforge.evidence_graph import GRAPH_FILE, GraphInputs, build_validated_graph, graph_json, graph_summary
 from sciforge.llm.audit import ModelCallAudit
 from sciforge.llm.budget import BudgetTracker, RetryPolicy
 from sciforge.llm.client import ModelClient
@@ -44,6 +47,7 @@ from sciforge.model_pipeline import (
     run_model_pipeline,
 )
 from sciforge.models import Record, VerificationResult
+from sciforge.output_guard import rejected_text_values
 from sciforge.pipeline import _write_json, make_run_dir
 from sciforge.stages.common import CallContext
 from sciforge.stages.gaps import gaps_json, run_gaps_stage
@@ -122,6 +126,20 @@ def _redact_synthesis_entries(audit: ModelCallAudit, plans: list[dict[str, Any]]
                         }, sort_keys=True)
                 if echoed:
                     original["assistant_messages"] = echoed
+                if plan.get("redact_request_messages"):
+                    # v0.4 critic/revision prompts that carried candidate hypotheses later rejected
+                    stored = []
+                    for m in request["messages"]:
+                        if isinstance(m, dict) and m.get("role") == "user":
+                            content = m.get("content") or ""
+                            stored.append(content)
+                            m["content"] = json.dumps({
+                                "redaction_mode": REDACTION_MODE,
+                                "request_payload": "[redacted: contained candidate hypotheses that were rejected]",
+                                "sha256": hashlib.sha256(content.encode("utf-8")).hexdigest(),
+                                "length": len(content)}, sort_keys=True)
+                    if stored:
+                        original["request_user_messages"] = stored
             entry["model_output_redacted"] = True
             entry["redaction_mode"] = REDACTION_MODE
             if len(original) > 4:
@@ -139,6 +157,7 @@ class InvestigationModelResult:
     report_validation: dict[str, Any]
     budget: dict[str, Any]
     files: dict[str, Path]
+    evidence_graph: dict[str, Any] | None = None
 
 
 def _skipped(stage: str, reason: str) -> SynthesisResult:
@@ -215,7 +234,10 @@ def run_model_investigation(
     elif not gaps.accepted:
         hyps = _skipped("hypotheses", "no_accepted_gaps")
     else:
-        hyps = run_hypotheses_stage(ctx, context, accepted_evidence, gaps.accepted, known_sources)
+        source_types = dict((search_summary or {}).get("source_classification") or {})
+        verified_texts = {s.record_id: s.source_text or "" for s in base.source_texts.usable}
+        hyps = run_hypotheses_stage(ctx, context, accepted_evidence, gaps.accepted, known_sources,
+                                    source_types=source_types, source_texts=verified_texts)
         stop = hyps.stop
     _write_json(files["hypotheses"], {**header, "generated_at": iso_utc(now()), **hypotheses_json(hyps)}, secrets)
 
@@ -227,7 +249,8 @@ def run_model_investigation(
     else:
         narrative = run_narrative_stage(ctx, context, accepted_evidence, gaps.accepted, hyps.accepted, known_sources)
 
-    plans = [r.redaction_plan for r in (gaps, hyps, narrative) if r.redaction_plan]
+    plans = [r.redaction_plan for r in (gaps, narrative) if r.redaction_plan]
+    plans += getattr(hyps, "redaction_plans", None) or ([hyps.redaction_plan] if hyps.redaction_plan else [])
     originals = _redact_synthesis_entries(audit, plans)
     audit.write(files["model_calls"])
 
@@ -243,8 +266,20 @@ def run_model_investigation(
         search_summary=search_summary, source_texts=source_texts, evidence=evidence, gaps=gaps, hypotheses=hyps,
         narrative=narrative, records=records, verification=verification, stage_notes=notes)
     files["report"].write_text(redact_text(report, secrets), encoding="utf-8")
+
+    # ---- v0.4 evidence-to-hypothesis graph (deterministic, code only; no model call)
+    graph = build_validated_graph(GraphInputs(
+        records=records, verification=verification, source_texts=source_texts.get("sources") or [],
+        accepted_evidence=accepted_evidence, gaps=gaps.accepted, hypotheses=hyps.accepted,
+        source_types=dict((search_summary or {}).get("source_classification") or {}),
+        report_citations=validation.get("citations") or [],
+        rejected_evidence_texts=rejected_text_values(base.evidence.rejected_raw)))
+    files["evidence_graph"] = target / GRAPH_FILE
+    files["evidence_graph"].write_text(redact_text(graph_json(graph), secrets), encoding="utf-8")
+
     budget = tracker.summary()
     _write_json(files["report_validation"], {**header, "generated_at": iso_utc(now()), **validation,
+                                             "evidence_graph": graph_summary(graph),
                                              "budget": budget,
                                              "debug_keep_rejected_raw": bool(debug_keep_rejected_raw)}, secrets)
 
@@ -262,4 +297,5 @@ def run_model_investigation(
         _write_json(debug_file, existing, secrets)
         files["debug_rejected_raw"] = debug_file
     return InvestigationModelResult(run_dir=target, base=base, gaps=gaps, hypotheses=hyps, narrative=narrative,
-                                    report_validation=validation, budget=budget, files=files)
+                                    report_validation=validation, budget=budget, files=files,
+                                    evidence_graph=graph)

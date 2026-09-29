@@ -1,31 +1,42 @@
 """Orchestrates one v0.2 investigation.
 
 Flow: expand queries -> search (larger candidate pool per query and database)
--> merge -> dedup -> deterministic selection -> verify (with backfill) -> write files.
+-> merge -> dedup -> title pre-score -> bounded abstract enrichment ->
+deterministic relevance/diversity scoring -> source-type classification and
+source policy -> verify (with backfill) -> write files.
 
 Query plan (:mod:`sciforge.query_expansion`, deterministic, no model): the
-research question verbatim (always the first query, exactly as before) plus,
-unless disabled (``SCIFORGE_QUERY_EXPANSION=false`` / ``query_expansion=False``),
-focused anchor×facet queries from a curated concept map. Every query is run on
-PubMed and Crossref, each requesting ``max(candidate_pool_per_query,
-max_results)`` records (``SCIFORGE_CANDIDATE_POOL_PER_QUERY``, default 10).
-Per database the hits are merged (identical hits kept once; no cap), then:
+research question verbatim (always the first query) plus, unless disabled
+(``SCIFORGE_QUERY_EXPANSION=false`` / ``query_expansion=False``), focused
+anchor×facet queries from a curated concept map. Every query is run on PubMed
+and Crossref, each requesting ``max(candidate_pool_per_query, max_results)``
+records (``SCIFORGE_CANDIDATE_POOL_PER_QUERY``, default 10). Per database the
+hits are merged (identical hits kept once; no cap), then:
 
 1. the unchanged v0.2 dedup merges cross-database / cross-query duplicates;
-2. :mod:`sciforge.source_selection` scores every unique candidate from its
-   retrieved title (and abstract, if any) and query provenance and ranks the
-   pool greedily for concept diversity (deterministic, stable tie-breaking);
-3. the unchanged v0.2 verifier checks the top ``max_selected`` candidates
-   (default ``2 * max_results``; the web app passes the model's ``max_sources``);
-   if some fail verification, the next-ranked candidates are verified
-   (backfill, at most ``3 * max_selected`` candidates in total), so a failure
-   does not silently shrink the final set while verified candidates remain.
+2. every unique candidate is pre-scored from its title and query provenance;
+   the top ``SCIFORGE_ABSTRACT_ENRICHMENT_LIMIT`` (default 50; 0 = off) are
+   enriched with abstracts (batched PubMed efetch; Crossref abstracts already
+   present in the search results) — :mod:`sciforge.abstract_enrichment`;
+3. :mod:`sciforge.source_selection` scores every candidate (title components +
+   separate, lower-weighted abstract components + provenance) and ranks the pool
+   greedily for concept diversity (deterministic, stable tie-breaking);
+4. :mod:`sciforge.source_classification` labels every candidate from
+   bibliographic metadata (journal article / preprint / conference paper /
+   book/chapter / unknown) and applies ``SCIFORGE_SOURCE_POLICY``
+   (``peer_reviewed_preferred`` by default);
+5. the unchanged v0.2 verifier checks the top ``max_selected`` candidates in
+   policy order (default ``2 * max_results``; the web app passes the model's
+   ``max_sources``); failures are backfilled from the ranking (at most
+   ``3 * max_selected`` candidates verified in total).
 
 ``sources.json`` / ``verification.json`` contain every candidate that was sent
-to verification (in deduplication order); the selected ids are listed in
-``summary.json`` (``selection.selected_record_ids``). The plan, per-query
-candidate counts, dedup results and per-candidate selection scores are written
-to ``search_log.json`` (and summarised in ``summary.json``).
+to verification (in deduplication order; each record in ``sources.json`` also
+carries its ``source_status``); the selected ids are listed in ``summary.json``
+(``selection.selected_record_ids``). The plan, per-query candidate counts,
+dedup results, abstract enrichment, per-candidate score components, source
+classification and policy decisions are written to ``search_log.json`` (and
+summarised in ``summary.json``).
 """
 
 from __future__ import annotations
@@ -42,7 +53,14 @@ from typing import Any
 import httpx
 
 from sciforge import __version__
-from sciforge.config import Settings
+from sciforge.abstract_enrichment import (
+    EnrichmentOutcome,
+    PubMedAbstractFetcher,
+    choose_enrichment_candidates,
+    enrich_abstracts,
+    make_pubmed_abstract_fetcher,
+)
+from sciforge.config import MAX_ABSTRACT_ENRICHMENT_LIMIT, SOURCE_POLICIES, Settings
 from sciforge.crossref import CrossrefClient
 from sciforge.dedup import deduplicate
 from sciforge.http_utils import HttpFetcher, Sleep
@@ -50,6 +68,8 @@ from sciforge.logging_utils import RunLog, iso_utc, redact_text, run_stamp, utc_
 from sciforge.models import ErrorEntry, Record, SearchOutcome, VerificationResult
 from sciforge.pubmed import PubMedClient
 from sciforge.query_expansion import QueryPlan, expand_queries, merge_query_outcomes, single_query_plan
+from sciforge.source_classification import STATUS_NOTE, PolicyOutcome, SourceClassification, apply_source_policy
+from sciforge.source_classification import POLICY_ONLY, classify_record
 from sciforge.source_selection import METHOD as SELECTION_METHOD
 from sciforge.source_selection import (
     VERIFY_BACKFILL_FACTOR,
@@ -115,6 +135,9 @@ def run_investigation(
     candidate_pool_per_query: int | None = None,
     max_selected: int | None = None,
     accept_partially_verified: bool = False,
+    abstract_enrichment_limit: int | None = None,
+    source_policy: str | None = None,
+    abstract_fetcher: PubMedAbstractFetcher | None = None,
 ) -> InvestigationResult:
     """Run a full retrieve-select-verify investigation and write output files.
 
@@ -127,6 +150,9 @@ def run_investigation(
     ``max_selected`` (default ``max_results * 2``) is the number of verified
     records the selection aims for; ``accept_partially_verified`` lets
     ``partially_verified`` records count towards it (model opt-in).
+    ``abstract_enrichment_limit`` / ``source_policy`` default to the settings
+    (``SCIFORGE_ABSTRACT_ENRICHMENT_LIMIT`` / ``SCIFORGE_SOURCE_POLICY``).
+    ``abstract_fetcher`` (tests) replaces the batched PubMed efetch used for enrichment.
     """
     query = question.strip()
     if not query:
@@ -141,6 +167,12 @@ def run_investigation(
     target = max_results * len(DATABASES) if max_selected is None else max_selected
     if isinstance(target, bool) or not isinstance(target, int) or target < 1:
         raise ValueError("max_selected must be a positive integer")
+    limit = settings.abstract_enrichment_limit if abstract_enrichment_limit is None else abstract_enrichment_limit
+    if isinstance(limit, bool) or not isinstance(limit, int) or not 0 <= limit <= MAX_ABSTRACT_ENRICHMENT_LIMIT:
+        raise ValueError(f"abstract_enrichment_limit must be an integer between 0 and {MAX_ABSTRACT_ENRICHMENT_LIMIT}")
+    policy = settings.source_policy if source_policy is None else source_policy
+    if policy not in SOURCE_POLICIES:
+        raise ValueError(f"source_policy must be one of {', '.join(SOURCE_POLICIES)}")
     started = now()
     run_dir = make_run_dir(Path(output_dir), started)
     run_log = RunLog(settings.secret_values())
@@ -171,10 +203,30 @@ def run_investigation(
             query_stats[database] = stats
         retrieved = [r for o in outcomes for r in o.records]
         unique, merged = deduplicate(retrieved)
-        ranked = rank_candidates(score_candidates(query, unique, origins))
         by_id = {r.record_id: r for r in unique}
-        selection = select_and_verify(ranked, by_id, Verifier(pubmed, crossref).verify_all, target,
-                                      accept_partially_verified=accept_partially_verified)
+        # Title/provenance pre-score -> bounded abstract enrichment -> final scores.
+        prescores = score_candidates(query, unique, origins)
+        considered = choose_enrichment_candidates(prescores, limit)
+        fetch = abstract_fetcher if abstract_fetcher is not None else make_pubmed_abstract_fetcher(fetcher, settings,
+                                                                                                    pubmed.limiter)
+        enrichment = enrich_abstracts(by_id, considered, limit=limit,
+                                      inline_abstracts=_inline_abstracts(unique, crossref.search_abstracts),
+                                      fetch_pubmed=fetch if limit > 0 else None)
+        scores = score_candidates(query, unique, origins, abstracts=enrichment.abstracts)
+        ranked = rank_candidates(scores)
+        classes = _classify(unique, pubmed.source_metadata, crossref.source_metadata)
+        policy_outcome = apply_source_policy([c.record_id for c in ranked],
+                                             {rid: c.source_status for rid, c in classes.items()},
+                                             {c.record_id: c.score.text_relevant for c in ranked}, policy)
+        ranked_by_id = {c.record_id: c for c in ranked}
+        ordered = [ranked_by_id[rid] for rid in policy_outcome.ordered_ids]
+        if ordered:
+            selection = select_and_verify(ordered, by_id, Verifier(pubmed, crossref).verify_all, target,
+                                          accept_partially_verified=accept_partially_verified)
+        else:
+            selection = SelectionOutcome(target=target, checked=[], verification=[], selected_ids=[], rounds=[],
+                                         max_checked=0, accepted_statuses=("verified", "partially_verified")
+                                         if accept_partially_verified else ("verified",))
         if selection.error is not None:
             run_log.add_error(ErrorEntry(database="all", stage="verification", query=query, timestamp=iso_utc(),
                                          error_type="unexpected_error", message=selection.error))
@@ -190,12 +242,17 @@ def run_investigation(
     finished = now()
     params = {"max_results_per_source": max_results, "from_year": from_year, "to_year": to_year,
               "candidate_pool_per_query": pool, "records_requested_per_query": per_query,
-              "max_selected": target}
+              "max_selected": target, "abstract_enrichment_limit": limit, "source_policy": policy}
     summary = build_summary(query, params, started, finished, outcomes, retrieved, unique, merged, verification,
                             run_log)
     expansion_log = _expansion_log(plan, query_stats)
     dedup_log = _dedup_log(retrieved, unique, merged)
     selection_log = _selection_log(ranked, selection)
+    enrichment_log = enrichment.to_json()
+    policy_log = _policy_log(policy_outcome, classes, selection, target)
+    for cand in selection_log["candidates"]:
+        c = classes.get(cand["record_id"])
+        cand["source_status"] = c.source_status if c else None
     summary["query_generation"] = _query_generation(plan)
     summary["queries_used"] = {"pubmed": [q.pubmed for q in plan.queries],
                                "crossref": [q.crossref for q in plan.queries]}
@@ -208,11 +265,64 @@ def run_investigation(
     summary["selection"] = {**{k: v for k, v in selection_log.items() if k != "candidates"},
                             "selected_scores": [c for c in selection_log["candidates"]
                                                 if c["record_id"] in selection.selected_ids]}
+    summary["abstract_enrichment"] = enrichment.counts()
+    summary["source_policy"] = {k: v for k, v in policy_log.items() if k not in ("classification", "tier_by_id",
+                                                                                "order_after_policy")}
+    summary["source_classification"] = {r.record_id: classes[r.record_id].source_status for r in records
+                                        if r.record_id in classes}
     summary["verified_records"] = len(records)
     summary["run_directory"] = run_dir.name
     write_outputs(run_dir, query, params, summary, records, verification, run_log, settings.secret_values(),
-                  query_expansion=expansion_log, deduplication=dedup_log, selection=selection_log)
+                  query_expansion=expansion_log, deduplication=dedup_log, selection=selection_log,
+                  abstract_enrichment=enrichment_log, source_policy=policy_log,
+                  source_status={rid: c.to_json() for rid, c in classes.items()})
     return InvestigationResult(run_dir=run_dir, summary=summary, records=records, verification=verification)
+
+
+def _inline_abstracts(unique: list[Record], raw: dict[str, str]) -> dict[str, str]:
+    """record_id -> plain-text Crossref abstract from the search results (any merged provenance id)."""
+    from sciforge.sourcetext import jats_to_text
+
+    out: dict[str, str] = {}
+    for rec in unique:
+        for rid in [rec.record_id, *(p.source_record_id for p in rec.provenance)]:
+            text = jats_to_text(raw.get(rid))
+            if text:
+                out[rec.record_id] = text
+                break
+    return out
+
+
+def _classify(unique: list[Record], *metadata_maps: dict[str, dict[str, Any]]) -> dict[str, SourceClassification]:
+    """Source-type classification of every unique record from the metadata of all its merged provenance ids."""
+    out: dict[str, SourceClassification] = {}
+    for rec in unique:
+        ids = list(dict.fromkeys([rec.record_id, *(p.source_record_id for p in rec.provenance)]))
+        meta = [m[rid] for rid in ids for m in metadata_maps if rid in m]
+        out[rec.record_id] = classify_record(rec.record_id, meta, rec.doi)
+    return out
+
+
+def _policy_log(outcome: PolicyOutcome, classes: dict[str, SourceClassification], selection: SelectionOutcome,
+                target: int) -> dict[str, Any]:
+    selected = [{"record_id": rid, "source_status": classes[rid].source_status if rid in classes else "unknown"}
+                for rid in selection.selected_ids]
+    counts: dict[str, int] = {}
+    for item in selected:
+        counts[item["source_status"]] = counts.get(item["source_status"], 0) + 1
+    shortfall = max(0, target - len(selection.selected_ids))
+    note = None
+    if shortfall:
+        note = (f"Only {len(selection.selected_ids)} of {target} requested sources were selected"
+                + (" after excluding every source that is not a peer-reviewed journal article (metadata-based) "
+                   "under SCIFORGE_SOURCE_POLICY=peer_reviewed_only" if outcome.policy == POLICY_ONLY else "")
+                + ".")
+    return {**outcome.to_json(), "status_note": STATUS_NOTE,
+            "selected_sources": selected, "selected_status_counts": dict(sorted(counts.items())),
+            "preprints_selected": counts.get("preprint", 0),
+            "requested": target, "selected": len(selection.selected_ids), "shortfall": shortfall,
+            "fewer_than_requested": bool(shortfall), "shortfall_note": note,
+            "classification": {rid: c.to_json() for rid, c in classes.items()}}
 
 
 def _query_generation(plan: QueryPlan) -> str:
@@ -282,7 +392,7 @@ def build_summary(
         "sciforge_version": __version__,
         "question": query,
         "query_used": query,
-        "query_generation": "none: the research question was used verbatim as the search query",
+        "query_generation": "not recorded",
         "parameters": params,
         "started_at": iso_utc(started),
         "finished_at": iso_utc(finished),
@@ -301,6 +411,15 @@ def build_summary(
     }
 
 
+def _source_json(record: Record, source_status: dict[str, dict[str, Any]] | None) -> dict[str, Any]:
+    data = record.model_dump()
+    if source_status is not None:
+        c = source_status.get(record.record_id) or {}
+        data["source_status"] = c.get("source_status", "unknown")
+        data["source_status_basis"] = c.get("basis", [])
+    return data
+
+
 def write_outputs(
     run_dir: Path,
     query: str,
@@ -313,6 +432,9 @@ def write_outputs(
     query_expansion: dict[str, Any] | None = None,
     deduplication: dict[str, Any] | None = None,
     selection: dict[str, Any] | None = None,
+    abstract_enrichment: dict[str, Any] | None = None,
+    source_policy: dict[str, Any] | None = None,
+    source_status: dict[str, dict[str, Any]] | None = None,
 ) -> None:
     """Write search_log.json, sources.json, verification.json, summary.json."""
     _write_json(run_dir / "search_log.json", {
@@ -322,7 +444,9 @@ def write_outputs(
         "note": "Sensitive parameters (api_key, email, mailto) are redacted.",
         **({"query_expansion": query_expansion} if query_expansion is not None else {}),
         **({"deduplication": deduplication} if deduplication is not None else {}),
+        **({"abstract_enrichment": abstract_enrichment} if abstract_enrichment is not None else {}),
         **({"selection": selection} if selection is not None else {}),
+        **({"source_policy": source_policy} if source_policy is not None else {}),
         "requests": [e.model_dump() for e in run_log.entries],
         "errors": [e.model_dump() for e in run_log.errors],
     }, secrets)
@@ -330,7 +454,7 @@ def write_outputs(
         "sciforge_version": __version__,
         "question": query,
         "count": len(records),
-        "records": [r.model_dump() for r in records],
+        "records": [_source_json(r, source_status) for r in records],
     }, secrets)
     _write_json(run_dir / "verification.json", {
         "sciforge_version": __version__,

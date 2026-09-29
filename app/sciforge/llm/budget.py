@@ -41,6 +41,19 @@ Recorded spend (actuals) — ``cost_source`` values
 * ``unpriced`` — cost unknowable (no reported cost, no prices; only possible
   when the spend cap is disabled). Tokens are still charged.
 
+Output-side tokens: ``output_tokens_charged`` = :attr:`ModelUsage.billable_output_tokens` = reported
+``output_tokens + reasoning_tokens`` (xAI reports reasoning tokens separately from output tokens; reasoning is
+added exactly once; a larger ``total_tokens - input_tokens`` is charged if reported). Each attempt's accounting also records the raw reported ``output_tokens``,
+``reasoning_tokens`` (``usage.output_tokens_details.reasoning_tokens``), ``total_tokens`` and the
+provider-reported cost (``reported_cost_usd``; ``reported_cost_status`` = ``reported`` / ``unavailable`` —
+never fabricated). Reasoning *content* is never stored.
+
+Token settings vs. money: the per-call output setting (``SCIFORGE_MODEL_MAX_OUTPUT_TOKENS`` and per-stage
+overrides) is sent as the request's ``max_output_tokens`` and used for the pre-call worst case; it is NOT a
+guaranteed ceiling on billed tokens: xAI reports reasoning tokens separately from output tokens, so
+``max_output_tokens`` is not a total token ceiling. ``SCIFORGE_MAX_SPEND_USD`` is the hard financial guard: attempts whose worst case would
+exceed it are refused, and once recorded spend reaches it no further attempt is made.
+
 Failed attempts are charged exactly like successes under these rules, i.e. a
 failure without reported usage/cost is charged the full worst case. This is
 deliberately conservative: xAI's docs do not state which rejected requests
@@ -213,6 +226,9 @@ class BudgetTracker:
         self.input_tokens = 0
         self.output_tokens = 0
         self.reasoning_tokens = 0
+        self.output_tokens_reported = 0
+        self.reported_cost_usd = Decimal(0)
+        self.reported_cost_attempts = 0
         self.sources = 0
         self.sources_limited = False
         self.spend_usd = Decimal(0)
@@ -336,6 +352,12 @@ class BudgetTracker:
         self.input_tokens += in_tok
         self.output_tokens += out_tok
         self.reasoning_tokens += reasoning
+        if usage is not None and usage.output_tokens is not None:
+            self.output_tokens_reported += usage.output_tokens
+        reported_cost = usage.cost_usd_reported if usage is not None else None
+        if reported_cost is not None:
+            self.reported_cost_usd += reported_cost
+            self.reported_cost_attempts += 1
         if cost is None:
             self.unpriced_attempts += 1
         else:
@@ -345,6 +367,12 @@ class BudgetTracker:
         return {
             "input_tokens_charged": in_tok,
             "output_tokens_charged": out_tok,
+            "output_side_tokens_charged": out_tok,
+            "output_tokens_reported": usage.output_tokens if usage is not None else None,
+            "reasoning_tokens_reported": usage.reasoning_tokens if usage is not None else None,
+            "total_tokens_reported": usage.total_tokens if usage is not None else None,
+            "reported_cost_usd": _dstr(reported_cost),
+            "reported_cost_status": "reported" if reported_cost is not None else "unavailable",
             "usage_reported": usage is not None,
             "estimated_input_tokens": reservation.estimated_input_tokens,
             "max_output_tokens": reservation.max_output_tokens,
@@ -404,7 +432,11 @@ class BudgetTracker:
                 "logical_calls": self.logical_calls,
                 "input_tokens": self.input_tokens,
                 "output_tokens": self.output_tokens,
+                "output_side_tokens_charged": self.output_tokens,
+                "output_tokens_reported": self.output_tokens_reported,
                 "reasoning_tokens": self.reasoning_tokens,
+                "reported_cost_usd": _dstr(self.reported_cost_usd) if self.reported_cost_attempts else None,
+                "reported_cost_attempts": self.reported_cost_attempts,
                 "sources": self.sources,
                 "spend_usd": _dstr(self.spend_usd),
                 "spend_by_cost_source_usd": {k: _dstr(v) for k, v in self.spend_by_source.items()},
@@ -419,6 +451,8 @@ class BudgetTracker:
             },
             "prices_configured": self.prices.configured,
             "spend_cap_enabled": cap is not None,
+            "financial_guard": ("SCIFORGE_MAX_SPEND_USD is the hard financial guard; output-token settings are sent "
+                                "as max_output_tokens and are not a guaranteed ceiling on billed tokens"),
             "sources_limited": self.sources_limited,
             "exhausted_by": self.exhausted_by,
         }

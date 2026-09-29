@@ -242,22 +242,119 @@ def _gaps(request: ModelRequest) -> dict[str, Any]:
     return {"gaps": gaps}
 
 
+def _demo_gap_for(request: ModelRequest, evidence_id: str | None) -> str | None:
+    gaps = [g for g in _payload(request).get("research_gaps") or [] if isinstance(g, dict)]
+    for g in gaps:
+        if evidence_id and evidence_id in (g.get("supporting_evidence_ids") or []):
+            return g.get("gap_id")
+    return gaps[0].get("gap_id") if gaps else None
+
+
+def _falsification(compared: str, measured: str, weakening: str, supporting: str) -> dict[str, str]:
+    return {"manipulated_or_compared": compared, "measured": measured, "weakening_result": weakening,
+            "supporting_result": supporting}
+
+
 def _hypotheses(request: ModelRequest) -> dict[str, Any]:
+    """Two SYNTHETIC hypotheses: h1 passes all checks; h2 deliberately over-claims causality so the demo shows
+    the deterministic flags, the critic and the revision stage at work."""
     ev = _evidence_by_key(request)
-    gap_ids = [g.get("gap_id") for g in _payload(request).get("research_gaps") or [] if isinstance(g, dict)]
     hyps: list[dict[str, Any]] = []
-    if gap_ids and "demo-1" in ev:
+    g1 = _demo_gap_for(request, ev.get("demo-3"))
+    if g1 and "demo-1" in ev:
         support = [ev["demo-1"]] + ([ev["demo-3"]] if "demo-3" in ev else [])
-        hyps.append({"hypothesis_id": "h1", "label": "hypothesis",
-                     "statement": "Strict measurement standards may reduce the effect-size gap between "
-                                  "preregistered and conventional studies.",
-                     "supporting_evidence_ids": support, "research_gap_ids": [gap_ids[0]],
-                     "rationale": "The gap was absent in the simulated field with strict measurement standards.",
-                     "predicted_observable_outcome": "Fields with stricter measurement standards would show a "
-                                                     "smaller effect-size gap by preregistration status.",
-                     "assumptions": ["Measurement standards can be compared across fields."],
-                     "confidence": "low"})
+        hyps.append({
+            "hypothesis_id": "h1",
+            "hypothesis": "Strict measurement standards may be associated with a smaller effect-size gap between "
+                          "preregistered and conventional studies.",
+            "evidence_ids": support, "research_gap_id": g1, "mechanistic_claim_level": "association",
+            "rationale": "In the synthetic data the gap appeared in one simulated field but was absent in the "
+                         "simulated field with strict measurement standards.",
+            "prediction": "Fields with stricter measurement standards would show a smaller difference in median "
+                          "effect size between preregistered and conventional studies than fields with looser "
+                          "standards.",
+            "alternative_explanation": {
+                "explanation": "The simulated fields may differ in sample size rather than in measurement standards, "
+                               "which could also explain the absent difference.",
+                "basis": "evidence", "evidence_ids": [ev["demo-3"]] if "demo-3" in ev else [ev["demo-1"]]},
+            "falsification_test": _falsification(
+                "Fields grouped by the strictness of their measurement standards.",
+                "Difference in median effect size between preregistered and conventional studies.",
+                "The difference is as large in strict-standard fields as in fields with looser standards.",
+                "The difference shrinks consistently as measurement standards become stricter."),
+            "assumptions": ["Measurement standards can be compared across fields."],
+            "evidence_limitations": ["All demo evidence is synthetic and abstract-only.",
+                                     "Only one simulated field with strict standards was described."],
+            "confidence": "moderate"})
+    g2 = _demo_gap_for(request, ev.get("demo-2"))
+    if g2 and "demo-1" in ev and "demo-2" in ev:
+        hyps.append({
+            "hypothesis_id": "h2",
+            "hypothesis": "Selective reporting of positive results drives the larger effect sizes in conventional "
+                          "studies.",
+            "evidence_ids": [ev["demo-1"], ev["demo-2"]], "research_gap_id": g2,
+            "mechanistic_claim_level": "causal_claim",
+            "rationale": "Positive results were less frequent among preregistered reports, and preregistered studies "
+                         "reported smaller effect sizes.",
+            "prediction": "Among conventional studies, fields with higher positive-result rates would report larger "
+                          "median effect sizes than fields with lower positive-result rates.",
+            "alternative_explanation": {
+                "explanation": "Conventional studies may address questions with larger true effects, independent of "
+                               "reporting practices.",
+                "basis": "inference", "evidence_ids": []},
+            "falsification_test": _falsification(
+                "Conventional studies from fields with high versus low positive-result rates.",
+                "Median reported effect size.",
+                "Median effect sizes are similar regardless of the positive-result rate.",
+                "Median effect sizes are larger where positive-result rates are higher."),
+            "assumptions": ["Positive-result rates reflect selective reporting."],
+            "evidence_limitations": ["Effect sizes and positive-result rates come from separate synthetic samples."],
+            "confidence": "high"})
     return {"hypotheses": hyps}
+
+
+_CRITIC_CHECK_NAMES = ("evidence_supports_mechanism", "causal_language_exceeds_evidence", "distinct_from_evidence",
+                       "prediction_measurable", "prediction_discriminates", "falsification_meaningful",
+                       "ignored_contradictions_or_missing_evidence", "confidence_consistent")
+
+
+def _critic(request: ModelRequest) -> dict[str, Any]:
+    """SYNTHETIC critic: flags over-claimed causality and over-confidence; passes everything else."""
+    reviews = []
+    for cand in _payload(request).get("candidate_hypotheses") or []:
+        if not isinstance(cand, dict):
+            continue
+        overclaims = cand.get("mechanistic_claim_level") == "causal_claim" or bool(cand.get("deterministic_flags"))
+        checks = {name: {"verdict": "pass", "explanation": "Demo critic: no problem found for this check."}
+                  for name in _CRITIC_CHECK_NAMES}
+        problems: list[str] = []
+        if overclaims:
+            checks["causal_language_exceeds_evidence"] = {
+                "verdict": "fail", "explanation": "Demo critic: the synthetic evidence shows an association only, "
+                                                  "but the wording claims causation."}
+            checks["confidence_consistent"] = {
+                "verdict": "fail", "explanation": "Demo critic: high confidence is not consistent with two small "
+                                                  "synthetic samples."}
+            problems.append("Causal wording and confidence exceed the synthetic evidence.")
+        reviews.append({"hypothesis_id": cand.get("hypothesis_id"), "checks": checks, "unsupported_evidence_ids": [],
+                        "substantive_problems": problems})
+    return {"reviews": reviews}
+
+
+def _revision(request: ModelRequest) -> dict[str, Any]:
+    """SYNTHETIC revision: lowers the claim level, hedges the wording and lowers the confidence."""
+    revised = []
+    for item in _payload(request).get("hypotheses_to_revise") or []:
+        hyp = dict((item or {}).get("hypothesis") or {})
+        if not hyp:
+            continue
+        hyp.update({
+            "mechanistic_claim_level": "association",
+            "hypothesis": "Selective reporting of positive results may partly account for the larger effect sizes "
+                          "reported in conventional studies.",
+            "confidence": "low"})
+        revised.append(hyp)
+    return {"hypotheses": revised}
 
 
 def _narrative(request: ModelRequest) -> dict[str, Any]:
@@ -289,7 +386,7 @@ def _narrative(request: ModelRequest) -> dict[str, Any]:
 
 _RESPONDERS: dict[str | None, Callable[[ModelRequest], dict[str, Any]]] = {
     "question": _question, "extraction": _extraction, "gaps": _gaps, "hypotheses": _hypotheses,
-    "report": _narrative,
+    "hypothesis_critic": _critic, "hypothesis_revision": _revision, "report": _narrative,
 }
 
 

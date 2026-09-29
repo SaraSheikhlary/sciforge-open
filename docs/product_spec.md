@@ -88,4 +88,4 @@ These targets are initial design goals, to be revised once baseline measurements
 
 ## 10. Model layer
 
-SciForge uses the xAI API for language-model steps (question definition, query generation, screening, evidence extraction, claim checking, report drafting). The API key is read from `XAI_API_KEY`; the model is configurable through `XAI_MODEL`. Model calls are isolated behind one interface so the provider can be changed without touching the rest of the system.
+SciForge uses the xAI API for language-model steps (question definition, evidence extraction, research gaps, hypotheses, report drafting). Query generation and source ranking are deterministic (no model). Claim checking is deterministic only (exact quotes, numeric consistency, citation/id validation); semantic (model-based) claim checking is not implemented. The API key is read from `XAI_API_KEY`; the model is configurable through `XAI_MODEL`. Model calls are isolated behind one interface so the provider can be changed without touching the rest of the system.

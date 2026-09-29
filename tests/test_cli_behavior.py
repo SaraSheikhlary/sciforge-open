@@ -72,7 +72,7 @@ def test_exit_0_successful_run_writes_sane_outputs(tmp_path, capsys, fast_sleep,
     assert sorted(p.name for p in run_dir.iterdir()) == OUTPUT_FILES
 
     summary = load(run_dir, "summary.json")
-    assert summary["question"] == "platelet shear" and summary["sciforge_version"] == "0.2.0"
+    assert summary["question"] == "platelet shear" and summary["sciforge_version"] == "0.4.0"
     assert summary["retrieved_per_source"] == {"pubmed": 2, "crossref": 2}
     assert summary["unique_records"] == 3 and summary["duplicates_merged"] == 1
     assert summary["verification_counts"] == {"verified": 3, "partially_verified": 0, "not_verified": 0}

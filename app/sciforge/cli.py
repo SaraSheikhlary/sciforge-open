@@ -95,6 +95,18 @@ def format_summary(summary: dict[str, Any], run_dir: str) -> str:
     if sel:
         lines.insert(5, f"Selected: {len(sel.get('selected_record_ids') or [])} of target {sel.get('target')} "
                         f"({sel.get('candidates_verified', 0)} candidates verified)")
+    enr = summary.get("abstract_enrichment")
+    if enr:
+        lines.insert(len(lines) - 2, f"Abstract enrichment for ranking: {enr.get('with_abstract', 0)} of "
+                                     f"{enr.get('considered', 0)} candidates had an abstract "
+                                     f"(limit {enr.get('limit', 0)}; the rest were ranked on title only)")
+    pol = summary.get("source_policy")
+    if pol:
+        lines.insert(len(lines) - 2, f"Source policy: {pol.get('policy')}; preprints selected: "
+                                     f"{pol.get('preprints_selected', 0)}; excluded by policy: "
+                                     f"{pol.get('excluded_count', 0)}")
+        if pol.get("fewer_than_requested") and pol.get("shortfall_note"):
+            lines.insert(len(lines) - 2, f"Note: {pol['shortfall_note']}")
     if summary["failed_databases"]:
         lines.append("Failed databases: " + ", ".join(summary["failed_databases"]))
     if summary["partially_failed_databases"]:

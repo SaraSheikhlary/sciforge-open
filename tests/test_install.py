@@ -12,7 +12,7 @@ import sciforge
 
 
 def test_installed_version_matches_package():
-    assert version("sciforge") == sciforge.__version__ == "0.2.0"
+    assert version("sciforge") == sciforge.__version__ == "0.4.0"
 
 
 def test_console_script_entry_point():
@@ -32,7 +32,7 @@ def _env():
 def test_python_dash_m_version_subprocess():
     out = subprocess.run([sys.executable, "-m", "sciforge", "--version"], capture_output=True, text=True,
                          timeout=60, env=_env())
-    assert out.returncode == 0 and out.stdout.strip() == "sciforge 0.2.0"
+    assert out.returncode == 0 and out.stdout.strip() == "sciforge 0.4.0"
 
 
 def test_console_script_subprocess():
@@ -40,7 +40,7 @@ def test_console_script_subprocess():
     if not script.exists():
         pytest.skip("console script not found next to the interpreter")
     ver = subprocess.run([str(script), "--version"], capture_output=True, text=True, timeout=60, env=_env())
-    assert ver.returncode == 0 and ver.stdout.strip() == "sciforge 0.2.0"
+    assert ver.returncode == 0 and ver.stdout.strip() == "sciforge 0.4.0"
     helped = subprocess.run([str(script), "investigate", "--help"], capture_output=True, text=True, timeout=60,
                             env=_env())
     assert helped.returncode == 0 and "--from-year" in helped.stdout

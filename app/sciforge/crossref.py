@@ -10,6 +10,7 @@ from sciforge.http_utils import FetchResult, HttpFetcher, MalformedResponseError
 from sciforge.logging_utils import iso_utc
 from sciforge.models import ErrorEntry, LookupResult, Record, SearchOutcome
 from sciforge.normalize import normalize_doi
+from sciforge.source_classification import crossref_metadata
 
 __all__ = ["CrossrefClient", "normalize_doi", "parse_crossref_year", "parse_works_list", "record_from_work"]
 
@@ -137,6 +138,10 @@ class CrossrefClient:
         self.fetcher = fetcher
         self.settings = settings
         self.limiter = limiter or fetcher.make_limiter(settings.crossref_min_interval)
+        # Side data captured from search results (Records are unchanged): record_id -> type metadata
+        # (type/subtype/publisher/container/institution) and record_id -> raw JATS abstract (when deposited).
+        self.source_metadata: dict[str, dict[str, Any]] = {}
+        self.search_abstracts: dict[str, str] = {}
 
     def _base_params(self) -> dict[str, str]:
         return {"mailto": self.settings.contact_email} if self.settings.contact_email else {}
@@ -202,7 +207,12 @@ class CrossrefClient:
                     )
                 )
                 continue
-            records.append(record_from_work(item, retrieved_at))
+            record = record_from_work(item, retrieved_at)
+            records.append(record)
+            self.source_metadata[record.record_id] = crossref_metadata(item)
+            abstract = item.get("abstract")
+            if isinstance(abstract, str) and abstract.strip():
+                self.search_abstracts[record.record_id] = abstract
         if result.entry is not None:
             result.entry.result_count = len(records)
         status = "ok" if not skipped else ("partial" if records else "failed")

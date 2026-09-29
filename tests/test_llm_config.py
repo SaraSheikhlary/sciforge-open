@@ -19,7 +19,7 @@ def test_defaults_match_d8():
     assert s.base_url == "https://api.x.ai"
     assert s.responses_url == "https://api.x.ai/v1/responses"
     assert s.store_prompts is True
-    assert s.entailment is True                      # D4
+    assert s.entailment is False                     # semantic claim checking is not implemented
     assert s.eligibility == "verified" and not s.include_partially_verified  # D2
     assert s.budget_limits() == BudgetLimits()
     assert BudgetLimits() == BudgetLimits(15, 10, 200_000, 2_000, 15.0)

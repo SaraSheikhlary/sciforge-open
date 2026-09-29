@@ -9,6 +9,8 @@ secrets/
 
 # SciForge run outputs (may contain query logs and model responses)
 runs/
+# Live Mode usage-limit store (belongs outside the repo; safeguard if pointed here)
+live_quota.json*
 
 # Python
 __pycache__/

@@ -55,10 +55,15 @@ def test_citation_rendered_from_v02_record_only():
     rec = record()
     line = render_citation("S1", rec, verified(rec), "pubmed_abstract")
     assert line == (
-        f"- **[S1]** Quixote Albemarle; Vandersloot Perpetua. *{BIB['title']}*. {BIB['journal']}. 1987. "
+        f"- **[S1]** **[Source type unknown]** Quixote Albemarle; Vandersloot Perpetua. *{BIB['title']}*. {BIB['journal']}. 1987. "
         f"DOI: [10.5555/zqx.1987.424242](https://doi.org/10.5555/zqx.1987.424242). "
         f"PMID: [31415926](https://pubmed.ncbi.nlm.nih.gov/31415926/). URL: <https://pubmed.ncbi.nlm.nih.gov/31415926/>. "
-        f"v0.2 verification: verified. Access: abstract only (PubMed abstract). Record: `{rec.record_id}`.")
+        f"v0.2 verification: verified. Access: abstract only (PubMed abstract). "
+        f"Source type: unknown (no conclusive bibliographic type metadata). Record: `{rec.record_id}`.")
+    preprint = render_citation("S1", rec, verified(rec), "pubmed_abstract", "preprint")
+    assert preprint.startswith("- **[S1]** **[Preprint — not peer-reviewed]** ")
+    assert "Source type: **Preprint — not peer-reviewed** (from bibliographic metadata)." in preprint
+    assert "Peer-reviewed journal article" not in preprint
 
 
 def test_citation_missing_fields_never_guessed():

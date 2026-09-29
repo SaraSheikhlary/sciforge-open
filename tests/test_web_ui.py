@@ -13,13 +13,14 @@ from conftest import FAKE_XAI_KEY, FAKE_XAI_MODEL  # noqa: E402
 from sciforge import app_service as svc  # noqa: E402
 
 APP = str(Path(__file__).resolve().parents[1] / "streamlit_app.py")
-TABS = ["Overview", "Evidence", "Conflicts", "Research Gaps", "Hypotheses", "Sources", "Validation"]
+TABS = ["Overview", "Evidence", "Conflicts", "Research Gaps", "Hypotheses", "Evidence Graph", "Sources", "Validation"]
 STAGE_LABELS = [label for _, label in svc.PROGRESS_STAGES]
 
 
 @pytest.fixture(autouse=True)
 def _clean(monkeypatch: pytest.MonkeyPatch) -> None:
-    for name in ("SCIFORGE_DEBUG_KEEP_REJECTED_RAW", "SCIFORGE_MAX_SOURCE_CHARS", "SCIFORGE_LIVE_ENABLED"):
+    for name in ("SCIFORGE_DEBUG_KEEP_REJECTED_RAW", "SCIFORGE_MAX_SOURCE_CHARS", "SCIFORGE_LIVE_ENABLED",
+                 "SCIFORGE_LIVE_REQUIRE_AUTH", "SCIFORGE_LIVE_ALLOWED_EMAILS"):
         monkeypatch.delenv(name, raising=False)
 
 
@@ -100,6 +101,7 @@ def test_demo_run_in_ui_makes_no_xai_call(monkeypatch):
 
 def test_live_mode_enabled_with_flag_and_credentials_and_key_never_rendered(monkeypatch):
     monkeypatch.setenv("SCIFORGE_LIVE_ENABLED", "true")
+    monkeypatch.setenv("SCIFORGE_LIVE_REQUIRE_AUTH", "false")          # sign-in layer tested separately
     monkeypatch.setenv("XAI_API_KEY", FAKE_XAI_KEY)
     monkeypatch.setenv("XAI_MODEL", FAKE_XAI_MODEL)
     at = app()
@@ -121,7 +123,9 @@ def test_demo_mode_end_to_end_in_ui():
         assert any(f"✅ **{label}**" in m for m in md), label
     assert any("SYNTHETIC DEMO DATA" in w.value for w in at.warning)
     text = rendered_text(at)
-    assert "Hypothesis: Strict measurement standards may reduce" in text
+    assert "Candidate hypothesis:** Strict measurement standards may be associated" in text \
+        or "Candidate hypothesis: Strict measurement standards may be associated" in text
+    assert "not a validated discovery or scientific finding" in text
     assert "[UNRESOLVED CITATION: rec_" not in text
 
 

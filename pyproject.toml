@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "sciforge"
-version = "0.2.0"
+version = "0.4.0"
 description = "Deterministic literature retrieval (PubMed, Crossref) and citation verification."
 readme = "README.md"
 requires-python = ">=3.10"
@@ -17,7 +17,9 @@ dependencies = [
 
 [project.optional-dependencies]
 dev = ["pytest>=7.4"]
-web = ["streamlit>=1.50,<2"]
+# Authlib: Streamlit st.login (OIDC) for Live Mode sign-in; SQLAlchemy + psycopg: optional postgres usage-limit
+# backend (SCIFORGE_LIVE_QUOTA_BACKEND=postgres via st.connection(type="sql")).
+web = ["streamlit>=1.50,<2", "Authlib>=1.3.2", "SQLAlchemy>=2.0", "psycopg[binary]>=3.1"]
 
 [project.scripts]
 sciforge = "sciforge.cli:main"

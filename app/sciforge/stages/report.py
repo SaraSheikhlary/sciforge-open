@@ -36,6 +36,7 @@ from pydantic import Field
 from sciforge.llm.parsing import StrictModel, strict_json_schema
 from sciforge.models import Record, VerificationResult
 from sciforge.prompts_synthesis import REPORT_INSTRUCTIONS, SYNTHESIS_PROMPT_VERSION
+from sciforge.stages.claim_checks import claim_check_lines, claim_check_summary
 from sciforge.stages.common import CallContext
 from sciforge.stages.hypotheses import gap_view
 from sciforge.stages.synthesis_checks import (
@@ -126,7 +127,9 @@ def run_narrative_stage(ctx: CallContext, question_context: dict[str, Any], acce
         "question_definition": question_context,
         "evidence": model_evidence_view(accepted_evidence),
         "research_gaps": gap_view(gaps),
-        "hypotheses": [{k: h[k] for k in ("hypothesis_id", "statement", "supporting_evidence_ids", "research_gap_ids")}
+        "hypotheses": [{"hypothesis_id": h["hypothesis_id"], "hypothesis": h["hypothesis"],
+                        "evidence_ids": h["evidence_ids"], "research_gap_id": h["research_gap_id"],
+                        "mechanistic_claim_level": h["mechanistic_claim_level"]}
                        for h in hypotheses],
         "source_ids": sorted(known_sources),
     }
@@ -159,20 +162,49 @@ ACCESS_LABELS = {"pubmed_abstract": "abstract only (PubMed abstract)",
                  "crossref_abstract": "abstract only (Crossref abstract)"}
 
 
+PREPRINT_BADGE = "Preprint — not peer-reviewed"
+SOURCE_TYPE_BADGES = {
+    "preprint": PREPRINT_BADGE,
+    "peer-reviewed journal article": "Peer-reviewed journal article (metadata label)",
+    "conference paper": "Conference paper",
+    "book/chapter": "Book/chapter",
+    "unknown": "Source type unknown",
+}
+HYPOTHESIS_DISCLAIMER = ("Unvalidated, AI-generated hypotheses for further investigation — not validated "
+                         "discoveries and not scientific findings.")
+
+
+def source_type_badge(source_status: str | None) -> str:
+    """Short, prominent source-type label shown FIRST for every source (preprints never look peer reviewed)."""
+    return SOURCE_TYPE_BADGES.get(source_status or "unknown", SOURCE_TYPE_BADGES["unknown"])
+
+
+def source_type_label(source_status: str | None) -> str:
+    """Code-built source-type detail (metadata-based; preprints always flagged)."""
+    if source_status == "preprint":
+        return f"Source type: **{PREPRINT_BADGE}** (from bibliographic metadata)."
+    if source_status == "peer-reviewed journal article":
+        return "Source type: peer-reviewed journal article (metadata-based label, not a guarantee of peer review)."
+    if source_status in ("conference paper", "book/chapter"):
+        return f"Source type: {source_status} (from bibliographic metadata)."
+    return "Source type: unknown (no conclusive bibliographic type metadata)."
+
+
 def render_citation(ref: str, record: Record, verification: VerificationResult | None,
-                    access_level: str | None) -> str:
+                    access_level: str | None, source_status: str | None = None) -> str:
     """One J-section line built ONLY from the v0.2 record (never from model text)."""
     authors = "; ".join(_md(a) for a in record.authors) if record.authors else "authors not available"
     title = f"*{_md(record.title)}*" if record.title else "title not available"
     journal = _md(record.journal) if record.journal else "journal not available"
     year = str(record.year) if record.year is not None else "year not available"
-    parts = [f"- **[{ref}]** {authors}. {title}. {journal}. {year}."]
+    parts = [f"- **[{ref}]** **[{source_type_badge(source_status)}]** {authors}. {title}. {journal}. {year}."]
     parts.append(f"DOI: [{_md(record.doi)}](https://doi.org/{record.doi})." if record.doi else "DOI: not available.")
     parts.append(f"PMID: [{record.pmid}](https://pubmed.ncbi.nlm.nih.gov/{record.pmid}/)." if record.pmid
                  else "PMID: not available.")
     parts.append(f"URL: <{record.source_url}>." if record.source_url else "URL: not available.")
     parts.append(f"v0.2 verification: {verification.status if verification else 'not available'}.")
     parts.append(f"Access: {ACCESS_LABELS.get(access_level or '', 'not accessed')}.")
+    parts.append(source_type_label(source_status))
     parts.append(f"Record: `{record.record_id}`.")
     return " ".join(parts)
 
@@ -186,10 +218,11 @@ class SourceIndex:
     """Assigns [S#] numbers in order of first use and resolves ids against v0.2 records (fail closed)."""
 
     def __init__(self, records: Sequence[Record], verification: Iterable[VerificationResult],
-                 access_levels: Mapping[str, str]) -> None:
+                 access_levels: Mapping[str, str], source_statuses: Mapping[str, str] | None = None) -> None:
         self.records = {r.record_id: r for r in records}
         self.verification = {v.record_id: v for v in verification}
         self.access = dict(access_levels)
+        self.statuses = dict(source_statuses or {})
         self.order: list[str] = []
 
     def ref(self, record_id: str) -> str:
@@ -216,9 +249,11 @@ class SourceIndex:
                                "detail": "id not found among the v0.2 records; citation not rendered (fail closed)"})
                 continue
             n += 1
-            lines.append(render_citation(f"S{n}", record, self.verification.get(rid), self.access.get(rid)))
+            lines.append(render_citation(f"S{n}", record, self.verification.get(rid), self.access.get(rid),
+                                         self.statuses.get(rid)))
             citations.append({"ref": f"S{n}", "record_id": rid, "status": "resolved",
-                              "v02_verification_status": self.verification[rid].status if rid in self.verification else None})
+                              "v02_verification_status": self.verification[rid].status if rid in self.verification else None,
+                              "source_status": self.statuses.get(rid) or "unknown"})
         return lines, citations, issues
 
 
@@ -272,10 +307,111 @@ def _selection_lines(w: Callable[[str], None], summary: Mapping[str, Any]) -> No
     params = summary.get("parameters") or {}
     w(f"- **Candidate pool:** {params.get('records_requested_per_query', 'n/a')} records requested per query and "
       f"database; {summary.get('total_retrieved', 'n/a')} candidates before deduplication")
+    enr = summary.get("abstract_enrichment") or {}
+    if enr:
+        if enr.get("limit"):
+            w(f"- **Abstract enrichment (for ranking only):** limit {enr.get('limit')} candidates; "
+              f"{enr.get('considered', 0)} considered, {enr.get('with_abstract', 0)} with an abstract "
+              f"(batched PubMed efetch or Crossref abstract field), "
+              f"{enr.get('title_only_considered', 0)} considered but title-only")
+        else:
+            w("- **Abstract enrichment:** disabled (SCIFORGE_ABSTRACT_ENRICHMENT_LIMIT=0); ranking used titles only")
     w(f"- **Selection:** {_md(str(sel.get('method', 'deterministic')))}; target {sel.get('target', 'n/a')} verified "
       f"records, {sel.get('candidates_verified', 'n/a')} candidates sent to verification"
       + (" (backfilled after failed verification)" if sel.get("backfilled") else "")
       + f", {len(sel.get('selected_record_ids') or [])} selected")
+    pol = summary.get("source_policy") or {}
+    if pol:
+        counts = pol.get("selected_status_counts") or {}
+        w(f"- **Source policy:** {_md(str(pol.get('policy')))}; excluded by policy: {pol.get('excluded_count', 0)}; "
+          "selected source types (metadata-based): "
+          + (", ".join(f"{_md(k)} {v}" for k, v in counts.items()) or "none"))
+        if pol.get("preprints_selected"):
+            w(f"- **Preprints:** {pol['preprints_selected']} selected source(s) are preprints (not peer reviewed); "
+              f"they are labelled \"{PREPRINT_BADGE}\" in sections D and J")
+        if pol.get("fewer_than_requested"):
+            w(f"- **Fewer sources than requested:** {_md(str(pol.get('shortfall_note') or ''))}")
+
+CRITIC_CHECK_LABELS = {
+    "evidence_supports_mechanism": "Evidence supports the proposed mechanism",
+    "causal_language_exceeds_evidence": "Causal language within what the evidence supports",
+    "distinct_from_evidence": "Distinct from simply restating the evidence",
+    "prediction_measurable": "Prediction is measurable",
+    "prediction_discriminates": "Prediction discriminates from the alternative",
+    "falsification_meaningful": "Falsification test is meaningful",
+    "ignored_contradictions_or_missing_evidence": "No contradictions or missing evidence ignored",
+    "confidence_consistent": "Confidence consistent with the evidence",
+}
+
+
+def _hypothesis_section(w: Callable[[str], None], hypotheses: SynthesisResult | None,
+                        evidence_by_id: Mapping[str, Any], index: SourceIndex, gaps: SynthesisResult | None) -> None:
+    """Section H: every hypothesis with why it was proposed, alternatives, falsification, limitations,
+    critic findings / revision status and validation status (all structure rendered by code)."""
+    from sciforge.hypothesis_validation import HYPOTHESIS_NOTICE
+
+    engine = getattr(hypotheses, "critic_status", None)
+    if hypotheses is not None and engine is not None:
+        w(f"- **Stress test:** generation -> critic ({hypotheses.critic_status}"
+          + (f", {_md(str(hypotheses.critic_skip_reason))}" if hypotheses.critic_skip_reason else "")
+          + f") -> revision ({hypotheses.revision_status.replace('_', ' ')}"
+          + (f", {_md(str(hypotheses.revision_skip_reason))}" if hypotheses.revision_skip_reason else "")
+          + f"). Candidates {hypotheses.candidates}, accepted {len(hypotheses.accepted)}, rejected "
+          f"{len(hypotheses.rejected)}. Deterministic validation outranks the model and the critic.")
+        w("")
+    gap_text = {g["gap_id"]: g["gap_statement"] for g in (gaps.accepted if gaps else [])}
+    if not (hypotheses and hypotheses.accepted):
+        w("No candidate hypotheses passed the deterministic checks.")
+    for h in (hypotheses.accepted if hypotheses else []):
+        if "hypothesis" not in h:        # defensive: pre-v0.4 record shape
+            continue
+        w(f"### {h['hypothesis_id']} — {HYPOTHESIS_NOTICE}")
+        w("")
+        w(f"- **Label:** {h['label']}")
+        w(f"- **Candidate hypothesis:** {_md(h['hypothesis'])}")
+        w(f"- **Claim level:** {h['mechanistic_claim_level'].replace('_', ' ')} (cited evidence supports at most "
+          f"{h['supported_claim_level'].replace('_', ' ')}). {_md(h['causality_statement'])}")
+        w(f"- **Why it was proposed:** {_md(h['rationale'])} — research gap {h['research_gap_id']}"
+          + (f" ({_md(gap_text[h['research_gap_id']])})" if h['research_gap_id'] in gap_text else "")
+          + f"; linked evidence: {_ev_refs(h['evidence_ids'], evidence_by_id, index)}.")
+        w(f"- **Prediction (measurable):** {_md(h['prediction'])}")
+        alt = h["alternative_explanation"]
+        basis = (f"evidence: {_ev_refs(alt['evidence_ids'], evidence_by_id, index)}" if alt["basis"] == "evidence"
+                 else "inference (not tied to specific evidence)")
+        w(f"- **Alternative explanation:** {_md(alt['explanation'])} — basis: {basis}.")
+        f = h["falsification_test"]
+        fx = {k: _md(v).rstrip(". ") for k, v in f.items()}
+        w(f"- **How it could be falsified:** compare/manipulate: {fx['manipulated_or_compared']}; measure: "
+          f"{fx['measured']}; would weaken it: {fx['weakening_result']}; would support it: "
+          f"{fx['supporting_result']}.")
+        w("- **Assumptions:** " + ("; ".join(_md(a).rstrip(".") for a in h["assumptions"]) or "none stated") + ".")
+        w("- **Limitations:** " + "; ".join(_md(a).rstrip(".") for a in h["evidence_limitations"]) + ".")
+        w(f"- **Source quality:** {_md(h['source_quality_summary'])}")
+        c = h["confidence_detail"]
+        w(f"- **Confidence (qualitative):** {c['final']} (model proposed {c['proposed_by_model']}; deterministic "
+          f"ceiling {c['deterministic_ceiling']}: " + "; ".join(_md(r) for r in c["reasons"]) + ").")
+        st = h["stress_test"]
+        w(f"- **Critic review:** {st['critic_status'].replace('_', ' ')}"
+          + ("" if st["note"] == "critic review completed" else f" — {_md(st['note'])}") + ".")
+        for name, finding in (st.get("critic_findings") or {}).items():
+            w(f"  - {CRITIC_CHECK_LABELS.get(name, name)}: **{finding['verdict']}** — {_md(finding['explanation'])}")
+        if st.get("substantive_problems"):
+            w("  - Substantive problems raised: " + "; ".join(_md(p) for p in st["substantive_problems"]))
+        w(f"- **Revision status:** {st['revision_status']}"
+          + (f" (initial deterministic flags: {', '.join(h['validation']['initial_flags'])})"
+             if h["validation"].get("initial_flags") else "") + ".")
+        w("- **Validation status:** passed deterministic validation (evidence links, research gap, prediction, "
+          "alternative, falsification test, quotes, bibliographic checks, claim level). This is not scientific "
+          "validation.")
+        w("")
+    rejected = hypotheses.rejected if hypotheses else []
+    if rejected:
+        w("**Rejected candidate hypotheses** (not shown; safe diagnostics only):")
+        for r in rejected:
+            label = r.get("hypothesis_id") or f"item {r['item_index']}"
+            w(f"- {label} — rejected at {r.get('rejected_at', 'generation')}: "
+              + ", ".join(dict.fromkeys(r["reason_codes"])) + ".")
+
 
 def build_report(
     *,
@@ -296,7 +432,12 @@ def build_report(
     accepted = list(evidence.get("accepted", []))
     evidence_by_id = {e["evidence_id"]: e for e in accepted}
     access = {s["record_id"]: s.get("access_level") for s in source_texts.get("sources", [])}
-    index = SourceIndex(records, verification, access)
+    statuses = (search_summary or {}).get("source_classification") or {}
+    index = SourceIndex(records, verification, access, statuses)
+    synthesis = [r for r in (gaps, hypotheses, narrative) if r is not None]
+    check_inputs = {"evidence_accepted": len(accepted), "evidence_rejected": list(evidence.get("rejected", [])),
+                    "synthesis_accepted": sum(len(r.accepted) for r in synthesis),
+                    "synthesis_rejected": [x for r in synthesis for x in r.rejected]}
     paragraphs = narrative.accepted if narrative else []
     by_section: dict[str, list[dict[str, Any]]] = {s: [p for p in paragraphs if p["section"] == s]
                                                    for s in NARRATIVE_SECTIONS}
@@ -305,7 +446,7 @@ def build_report(
 
     w("# SciForge research report")
     w("")
-    w("> Development build (v0.3 model layer, not released). Sections B, D, G, H and J are built by code; C, E, I "
+    w("> Development build (v0.3 model layer + v0.4 hypothesis engine, not released). Sections B, D, G, H and J are built by code; C, E, I "
       "and part of F contain model-written narrative that passed deterministic checks. Every citation in J is "
       "rendered by code from verified v0.2 records; the model cannot create citations. All evidence is from "
       "abstracts only.")
@@ -333,8 +474,7 @@ def build_report(
         _search_queries(w, search_summary, question)
         w(f"- **Databases:** {', '.join(search_summary.get('databases_queried') or []) or 'not recorded'}")
         w(f"- **Run:** started {search_summary.get('started_at', 'n/a')}, finished {search_summary.get('finished_at', 'n/a')} (UTC)")
-        w(f"- **Year filter:** from {params.get('from_year') or 'any'} to {params.get('to_year') or 'any'}; "
-          f"max results per source {params.get('max_results_per_source', 'n/a')}")
+        w(f"- **Year filter:** from {params.get('from_year') or 'any'} to {params.get('to_year') or 'any'}")
         hits = search_summary.get("total_hits_reported") or {}
         got = search_summary.get("retrieved_per_source") or {}
         for db in search_summary.get("databases_queried") or []:
@@ -348,9 +488,14 @@ def build_report(
         w("- v0.2 search metadata was not provided to the report stage.")
     concepts = (question_definition or {}).get("key_concepts") or []
     w(f"- **Concepts (model-proposed, not used for searching):** " + ("; ".join(_md(c) for c in concepts) or "none"))
-    w("- **Inclusion/exclusion criteria:** no inclusion/exclusion criteria applied beyond the year filter; "
-      "candidates were ranked deterministically from retrieved titles and query provenance (see above). "
-      "Model eligibility: "
+    if (search_summary or {}).get("selection"):
+        criteria = ("year filter (if any) and the source policy shown above; candidates were deduplicated, ranked "
+                    "deterministically (no model) from retrieved titles, abstracts retrieved by bounded enrichment "
+                    "and query provenance, and DOI/PMID-verified before use (see above). ")
+    else:
+        criteria = ("year filter (if any); no candidate ranking or source-policy step was recorded for this run "
+                    "(see the query/record lines above). ")
+    w("- **Inclusion/exclusion criteria:** " + criteria + "Model eligibility: "
       f"{source_texts.get('eligibility_policy', 'verified')} records, at most {source_texts.get('max_sources', 'n/a')} "
       f"sources, abstracts capped at {source_texts.get('max_source_chars', 'n/a')} characters.")
     w("")
@@ -373,12 +518,13 @@ def build_report(
     w(f"## {SECTION_TITLES['D']}")
     w("")
     if accepted:
-        w("| Evidence | Claim | Supporting quote (verbatim) | Category | Confidence | Access | Source |")
-        w("|---|---|---|---|---|---|---|")
+        w("| Evidence | Claim | Supporting quote (verbatim) | Category | Confidence | Access | Source | Source type |")
+        w("|---|---|---|---|---|---|---|---|")
         for ev in accepted:
             w(f"| {ev['evidence_id']} | {_md(ev['claim'])} | {_md(ev['quote'])} | {ev['evidence_category']} | "
               f"{ev['confidence']} | {ACCESS_LABELS.get(ev.get('access_level') or '', 'abstract only')} | "
-              f"[{index.ref(ev['source_record_id'])}] |")
+              f"[{index.ref(ev['source_record_id'])}] | "
+              f"**{source_type_badge(index.statuses.get(ev['source_record_id']))}** |")
     else:
         w("No accepted evidence records.")
     w("")
@@ -413,7 +559,9 @@ def build_report(
         if res is not None:
             w(f"- {name}: {len(res.accepted)} accepted, {len(res.rejected)} rejected; stage status {res.status}"
               + (f" ({res.skip_reason})" if res.skip_reason else "") + ".")
-    w("- Claim support is deterministic only (no model entailment check in this build).")
+    claim_check_start = len(out)
+    for line in claim_check_lines(claim_check_summary(**check_inputs)):
+        w(f"- {line}")   # re-rendered below once citation counts are known
     for note in stage_notes:
         w(f"- {_md(note)}")
     for p in by_section["limitations"]:
@@ -436,15 +584,9 @@ def build_report(
     # H
     w(f"## {SECTION_TITLES['H']}")
     w("")
-    if hypotheses and hypotheses.accepted:
-        for h in hypotheses.accepted:
-            assumptions = "; ".join(_md(a).rstrip(".") for a in h["assumptions"]) or "none stated"
-            w(f"- **{h['hypothesis_id']}** **[hypothesis]** Hypothesis: {_md(h['statement'])} "
-              f"Rationale: {_md(h['rationale'])} Predicted observable outcome: {_md(h['predicted_observable_outcome'])} "
-              f"Assumptions: {assumptions}. — research gaps: {', '.join(h['research_gap_ids'])}; supporting evidence: "
-              f"{_ev_refs(h['supporting_evidence_ids'], evidence_by_id, index)}; confidence: {h['confidence']}.")
-    else:
-        w("No validated candidate hypotheses.")
+    w(f"_{HYPOTHESIS_DISCLAIMER}_")
+    w("")
+    _hypothesis_section(w, hypotheses, evidence_by_id, index, gaps)
     w("")
 
     # I
@@ -456,7 +598,8 @@ def build_report(
     else:
         w("- Obtain and read the full text of the cited sources (this report used abstracts only).")
         if hypotheses and hypotheses.accepted:
-            w("- Design studies that test the candidate hypotheses in H against their predicted observable outcomes.")
+            w("- Design studies that test the candidate hypotheses in H against their predictions and falsification "
+              "tests.")
         if gaps and gaps.accepted:
             w("- Search specifically for evidence addressing the research gaps in G.")
     w("")
@@ -465,7 +608,21 @@ def build_report(
     w(f"## {SECTION_TITLES['J']}")
     w("")
     lines, citations, issues = index.render()
+    claim_checks = claim_check_summary(
+        **check_inputs, citations_resolved=sum(1 for c in citations if c["status"] == "resolved"),
+        citations_unresolved=sum(1 for c in citations if c["status"] == "unresolved"))
+    for i, line in enumerate(claim_check_lines(claim_checks)):
+        out[claim_check_start + i] = f"- {line}"
     if lines:
+        type_counts: dict[str, int] = {}
+        for c in citations:
+            if c["status"] == "resolved":
+                badge = source_type_badge(c.get("source_status"))
+                type_counts[badge] = type_counts.get(badge, 0) + 1
+        w("Each source starts with its source type (from bibliographic metadata; \"peer-reviewed journal "
+          "article\" is a metadata label, not a guarantee of peer review). Source types of cited sources: "
+          + ", ".join(f"**{k}** {v}" for k, v in sorted(type_counts.items())) + ".")
+        w("")
         out.extend(lines)
     else:
         w("No sources cited.")
@@ -487,6 +644,7 @@ def build_report(
                                                       "text_sha256")} for p in paragraphs],
                       "rejected": narrative.rejected if narrative else []},
         "citations": citations,
+        "claim_checks": claim_checks,
         "issues": issues,
         "counts": {"citations_resolved": sum(1 for c in citations if c["status"] == "resolved"),
                    "citations_unresolved": sum(1 for c in citations if c["status"] == "unresolved"),

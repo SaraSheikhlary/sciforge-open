@@ -28,12 +28,16 @@ RECOMMENDED_OUTPUT = {"SCIFORGE_MODEL_MAX_OUTPUT_TOKENS_QUESTION": "2000",
                       "SCIFORGE_MODEL_MAX_OUTPUT_TOKENS_EVIDENCE": "2000",
                       "SCIFORGE_MODEL_MAX_OUTPUT_TOKENS_GAPS": "4000",
                       "SCIFORGE_MODEL_MAX_OUTPUT_TOKENS_HYPOTHESES": "8000",
+                      "SCIFORGE_MODEL_MAX_OUTPUT_TOKENS_HYPOTHESIS_CRITIC": "4000",
+                      "SCIFORGE_MODEL_MAX_OUTPUT_TOKENS_HYPOTHESIS_REVISION": "4000",
                       "SCIFORGE_MODEL_MAX_OUTPUT_TOKENS_REPORT": "4000"}
 RECOMMENDED_EFFORT = {"SCIFORGE_MODEL_REASONING_EFFORT_EVIDENCE": "medium",
                       "SCIFORGE_MODEL_REASONING_EFFORT_GAPS": "medium",
                       "SCIFORGE_MODEL_REASONING_EFFORT_HYPOTHESES": "high",
+                      "SCIFORGE_MODEL_REASONING_EFFORT_HYPOTHESIS_CRITIC": "high",
+                      "SCIFORGE_MODEL_REASONING_EFFORT_HYPOTHESIS_REVISION": "medium",
                       "SCIFORGE_MODEL_REASONING_EFFORT_REPORT": "medium"}
-STAGES = ("question", "evidence", "gaps", "hypotheses", "report")
+STAGES = ("question", "evidence", "gaps", "hypotheses", "hypothesis_critic", "hypothesis_revision", "report")
 
 
 def settings_from(**env):
@@ -78,12 +82,15 @@ def test_stage_key_mapping():
 def test_stage_specific_output_limits():
     s = settings_from(**RECOMMENDED_OUTPUT)
     assert {st: s.max_output_tokens_for(st) for st in STAGES} == {
-        "question": 2000, "evidence": 2000, "gaps": 4000, "hypotheses": 8000, "report": 4000}
+        "question": 2000, "evidence": 2000, "gaps": 4000, "hypotheses": 8000, "hypothesis_critic": 4000,
+        "hypothesis_revision": 4000, "report": 4000}
     assert s.max_output_tokens_for("extraction") == 2000 and s.max_output_tokens_for("hypotheses:repair") == 8000
     limits = s.budget_limits()
     assert limits.max_output_tokens_per_call == 2000                                   # global kept
     assert limits.max_output_tokens_for("hypotheses") == 8000 and limits.max_output_tokens_for("gaps:repair") == 4000
     assert limits.to_dict()["max_output_tokens_by_stage"] == {"evidence": 2000, "gaps": 4000, "hypotheses": 8000,
+                                                              "hypothesis_critic": 4000,
+                                                              "hypothesis_revision": 4000,
                                                               "question": 2000, "report": 4000}
 
 
@@ -91,7 +98,8 @@ def test_unset_or_blank_stage_limits_fall_back_to_global():
     s = settings_from(SCIFORGE_MODEL_MAX_OUTPUT_TOKENS="3000", SCIFORGE_MODEL_MAX_OUTPUT_TOKENS_GAPS="  ",
                       SCIFORGE_MODEL_MAX_OUTPUT_TOKENS_HYPOTHESES="8000")
     assert {st: s.max_output_tokens_for(st) for st in STAGES} == {
-        "question": 3000, "evidence": 3000, "gaps": 3000, "hypotheses": 8000, "report": 3000}
+        "question": 3000, "evidence": 3000, "gaps": 3000, "hypotheses": 8000, "hypothesis_critic": 3000,
+        "hypothesis_revision": 3000, "report": 3000}
     assert s.max_output_tokens_for(None) == 3000 and s.max_output_tokens_for("unknown") == 3000
     assert settings_from().stage_max_output_tokens() == {}
 
@@ -143,7 +151,8 @@ def test_reasoning_effort_default_and_stage_overrides():
     assert s.reasoning_efforts() == {st: "high" for st in STAGES}
     s = settings_from(**RECOMMENDED_EFFORT)
     assert s.reasoning_efforts() == {"question": "high", "evidence": "medium", "gaps": "medium",
-                                     "hypotheses": "high", "report": "medium"}
+                                     "hypotheses": "high", "hypothesis_critic": "high",
+                                     "hypothesis_revision": "medium", "report": "medium"}
     s = settings_from(SCIFORGE_MODEL_REASONING_EFFORT="Low", SCIFORGE_MODEL_REASONING_EFFORT_GAPS=" XHIGH ",
                       SCIFORGE_MODEL_REASONING_EFFORT_QUESTION="xhigh")            # question override is ignored
     assert s.reasoning_effort_for("question") == "low" and s.reasoning_effort_for("gaps:repair") == "xhigh"
@@ -189,18 +198,20 @@ def test_pipeline_sends_stage_efforts_and_stage_output_limits(tmp_path, settings
                        max_output_tokens_per_call=2000, max_output_tokens_gaps=4000,
                        max_output_tokens_hypotheses=8000, max_output_tokens_report=4000,
                        reasoning_effort="high", reasoning_effort_evidence="medium", reasoning_effort_gaps="medium",
-                       reasoning_effort_report="low")
+                       reasoning_effort_report="low", max_output_tokens_hypothesis_critic=4000,
+                       reasoning_effort_hypothesis_critic="xhigh")
     recs, ver = m3.records()
     result, client = m3.run(tmp_path, settings, m3.full_script(recs), tracker=None, model_settings=ms)
     seen = [(stage_key(r.stage), r.reasoning_effort, r.max_output_tokens) for r in client.requests]
     assert seen == [("question", "high", 2000), ("evidence", "medium", 2000), ("evidence", "medium", 2000),
-                    ("gaps", "medium", 4000), ("hypotheses", "high", 8000), ("report", "low", 4000)]
-    assert client.reasoning_efforts == ["high", "medium", "medium", "medium", "high", "low"]
+                    ("gaps", "medium", 4000), ("hypotheses", "high", 8000), ("hypothesis_critic", "xhigh", 4000),
+                    ("report", "low", 4000)]
+    assert client.reasoning_efforts == ["high", "medium", "medium", "medium", "high", "xhigh", "low"]
     calls = json.loads(result.files["model_calls"].read_text())
     assert [(c["stage"], c["reasoning_effort"], c["max_output_tokens"]) for c in calls] == [
         (r.stage, r.reasoning_effort, r.max_output_tokens) for r in client.requests]
     assert result.budget["limits"]["max_output_tokens_by_stage"] == {"gaps": 4000, "hypotheses": 8000,
-                                                                     "report": 4000}
+                                                                     "hypothesis_critic": 4000, "report": 4000}
 
 
 def test_pipeline_without_model_settings_sends_no_reasoning_parameter(tmp_path, settings):
@@ -257,14 +268,15 @@ def test_reasoning_traces_never_reach_audit_or_response_objects():
 
 def test_no_secrets_or_reasoning_traces_in_any_run_file(tmp_path, settings):
     recs, ver = m3.records()
-    ms, client, bodies = _xai_client(m3.full_script(recs))
+    ms, client, bodies = _xai_client(m3.full_script(recs, critic={"reviews": [m3.critic_review("hyp_01")]}))
     from sciforge.investigation_pipeline import run_model_investigation
 
     result = run_model_investigation(m3.QUESTION, recs, ver, model_client=client, settings=settings,
                                      model_settings=ms, output_dir=tmp_path, search_summary=m3.SEARCH_SUMMARY,
                                      http_client=m3.mock_client(m3.api()), pubmed_limiter=m3.no_throttle(),
                                      crossref_limiter=m3.no_throttle(), sleep=lambda s: None, now=lambda: m3.FIXED)
-    assert [b["reasoning"]["effort"] for b in bodies] == ["high", "medium", "medium", "medium", "high", "medium"]
+    assert [b["reasoning"]["effort"] for b in bodies] == ["high", "medium", "medium", "medium", "high", "high",
+                                                                "medium"]
     assert all(b["store"] is False for b in bodies)
     files = [p for p in Path(result.run_dir).rglob("*") if p.is_file()]
     assert files

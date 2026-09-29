@@ -8,6 +8,7 @@ import httpx
 from conftest import (
     FAKE_API_KEY,
     FAKE_EMAIL,
+    efetch_empty_response,
     crossref_list_payload,
     crossref_work,
     crossref_work_payload,
@@ -44,6 +45,8 @@ def happy_handler(request: httpx.Request) -> httpx.Response:
         return json_response(crossref_work_payload(crossref_work("10.1000/ABC123")))
     if path == "/works/10.3000/other":
         return httpx.Response(404)
+    if path.endswith("efetch.fcgi"):
+        return efetch_empty_response()
     return httpx.Response(500)
 
 
@@ -60,7 +63,7 @@ def test_happy_path_outputs(tmp_path, settings):
 
     summary = json.loads((result.run_dir / "summary.json").read_text())
     assert summary["question"] == "platelet shear activation"
-    assert summary["sciforge_version"] == "0.2.0"
+    assert summary["sciforge_version"] == "0.4.0"
     assert summary["retrieved_per_source"] == {"pubmed": 2, "crossref": 2}
     assert summary["unique_records"] == 3 and summary["duplicates_merged"] == 1
     assert summary["verification_counts"] == {"verified": 2, "partially_verified": 0, "not_verified": 1}

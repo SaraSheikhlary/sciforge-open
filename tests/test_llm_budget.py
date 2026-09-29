@@ -246,7 +246,7 @@ def test_summary_shape():
     t.record(t.reserve(req()), usage())
     s = t.summary()
     assert set(s) == {"limits", "used", "remaining", "prices_configured", "spend_cap_enabled",
-                      "sources_limited", "exhausted_by"}
+                      "sources_limited", "exhausted_by", "financial_guard"}
     assert s["used"]["attempts"] == 1 and s["remaining"]["attempts"] == 14
     assert s["remaining"]["spend_usd"] == "14.9993"
     assert s["used"]["spend_by_cost_source_usd"]["price_estimate"] == "0.0007"

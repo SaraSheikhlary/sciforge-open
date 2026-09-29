@@ -21,31 +21,38 @@ def test_end_to_end_mocked_investigation(tmp_path, settings):
     recs, ver = records()
     before = copy.deepcopy([r.model_dump() for r in recs])
     result, client = run(tmp_path, settings, full_script(recs), recs=recs, ver=ver)
-    assert client.remaining == 0 and len(client.requests) == 6
+    assert client.remaining == 0 and len(client.requests) == 7
     assert sorted(p.name for p in result.run_dir.iterdir()) == [
-        "evidence.json", "gaps.json", "hypotheses.json", "model_calls.json", "question.json", "report.md",
+        "evidence.json", "evidence_graph.json", "gaps.json", "hypotheses.json", "model_calls.json", "question.json",
+        "report.md",
         "report_validation.json", "source_texts.json"]
     gaps = load(result, "gaps")
     assert gaps["status"] == "ok" and gaps["counts"]["accepted"] == 1 and gaps["model_layer"] == "v0.3-m3"
     hyps = load(result, "hypotheses")
-    assert hyps["accepted"][0]["research_gap_ids"] == ["gap_01"] and hyps["accepted"][0]["label"] == "hypothesis"
+    h = hyps["accepted"][0]
+    assert h["research_gap_ids"] == ["gap_01"] and h["research_gap_id"] == "gap_01"
+    assert h["label"] == "Unvalidated, AI-generated hypothesis for further investigation"
+    assert h["stress_test"]["critic_status"] == "completed"
+    assert h["stress_test"]["revision_status"] == "no revision required"
+    assert hyps["revision"]["status"] == "not_required"
     validation = load(result, "report_validation")
     assert validation["status"] == "passed" and validation["issues"] == []
     assert [c["record_id"] for c in validation["citations"]] == [recs[0].record_id, recs[1].record_id]
     report = result.files["report"].read_text(encoding="utf-8")
     for key in "ABCDEFGHIJ":
         assert f"## {key}." in report
-    assert "Hypothesis: Blocking GPIb may reduce" in report
+    assert "**Candidate hypothesis:** Blocking GPIb may reduce" in report
     # J: every bibliographic value comes from the v0.2 records
     for bib in (BIB, BIB2):
         for key in ("title", "journal", "doi", "pmid"):
             assert str(bib[key]) in report
-    # model_calls: one audit entry per attempt, all six stages; nothing needed redaction
+    # model_calls: one audit entry per attempt, all seven calls; nothing needed redaction
     calls = load(result, "model_calls")
     entries = calls["entries"] if isinstance(calls, dict) else calls
-    assert [e["stage"] for e in entries] == ["question", "extraction", "extraction", "gaps", "hypotheses", "report"]
+    assert [e["stage"] for e in entries] == ["question", "extraction", "extraction", "gaps", "hypotheses",
+                                          "hypothesis_critic", "report"]
     assert not any(e.get("model_output_redacted") for e in entries)
-    assert result.budget["used"]["attempts"] == 6
+    assert result.budget["used"]["attempts"] == 7
     assert [r.model_dump() for r in recs] == before
 
 
@@ -71,11 +78,12 @@ def test_deterministic_validation_precedence_end_to_end(tmp_path, settings):
     script = full_script(recs,
                          gaps={"gaps": [gap(), gap(supporting_evidence_ids=["ev_0404"], confidence="high")]},
                          hyps={"hypotheses": [hypothesis(),
-                                              hypothesis(statement="It is proven that GPIb drives this.",
+                                              hypothesis(evidence_ids=["ev_0001", "ev_0404"],
+                                                         mechanistic_claim_level="association",
                                                          confidence="high")]},
                          narr=narrative(paragraph(label="established", text="Shear raised it by 90% [ev_0001].")))
     result, _ = run(tmp_path, settings, script, recs=recs, ver=ver)
-    for name, code in (("gaps", "unknown_evidence_id"), ("hypotheses", "hypothesis_asserted_as_fact")):
+    for name, code in (("gaps", "unknown_evidence_id"), ("hypotheses", "unknown_evidence_id")):
         rej = load(result, name)["rejected"][0]
         assert rej["reason_codes"] == [code]
         assert rej["support"]["final_status"] == "rejected" and rej["validation_status"] == "rejected_deterministic"
@@ -92,7 +100,7 @@ def test_hypotheses_skipped_without_gaps_and_report_still_built(tmp_path, settin
     assert load(result, "hypotheses")["status"] == "skipped"
     assert load(result, "hypotheses")["skip_reason"] == "no_accepted_gaps"
     report = result.files["report"].read_text(encoding="utf-8")
-    assert "No validated research gaps." in report and "No validated candidate hypotheses." in report
+    assert "No validated research gaps." in report and "No candidate hypotheses passed the deterministic checks." in report
 
 
 def test_no_accepted_evidence_skips_all_synthesis(tmp_path, settings):

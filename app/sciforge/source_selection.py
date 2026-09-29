@@ -4,14 +4,17 @@ Flow (see :mod:`sciforge.pipeline`)::
 
     expanded queries -> larger candidate pool per query and database
       -> deduplication (unchanged :mod:`sciforge.dedup`)
-      -> deterministic selection (this module: score + greedy concept-diverse ranking)
+      -> title pre-score -> bounded abstract enrichment (:mod:`sciforge.abstract_enrichment`)
+      -> deterministic scoring (this module: title + abstract components) + greedy concept-diverse ranking
+      -> source policy (:mod:`sciforge.source_classification`)
       -> verification (unchanged :mod:`sciforge.verify`) with backfill
       -> at most ``target`` verified records (for the model layer: ``max_sources``)
 
-Scoring uses ONLY text that was actually retrieved for a candidate (its title;
-an abstract is used only if a caller passes one — v0.2 search results carry
-none) plus the provenance of the candidate (which expanded queries returned it,
-and at which rank). Nothing is inferred or looked up. Components:
+Scoring uses ONLY text that was actually retrieved for a candidate (its title
+and, when bounded abstract enrichment retrieved one, its abstract — see
+:mod:`sciforge.abstract_enrichment`) plus the provenance of the candidate (which
+expanded queries returned it, and at which rank). Nothing is inferred. Title
+components (``components``):
 
 * ``anchor_matched`` — the curated anchor concept of the question (e.g.
   platelet activation) appears in the text (+15);
@@ -23,6 +26,18 @@ and at which rank). Nothing is inferred or looked up. Components:
   match) present in the text (+3 each; core-term relevance);
 * ``query_origin`` — +2 if the verbatim-question query returned it, +1 per
   distinct query that returned it (at most +3).
+
+Abstract components (``abstract_components``; only when an abstract was
+retrieved; weighted at about half of the title weights and counting ONLY matches
+the title does not already provide, so an abstract can add relevance but never
+outweigh the same match in a title):
+
+* ``abstract_anchor`` — anchor concept found in the abstract but not the title (+7);
+* ``abstract_concept_coverage`` — facet concepts found only in the abstract (+5 each);
+* ``abstract_core_term_relevance`` — question keywords found only in the abstract (+1 each).
+
+``base_score`` = sum of both component groups. ``concepts_matched`` (used for
+concept diversity below) is the union of title and abstract concepts.
 
 Selection is greedy over the whole pool: at each step the candidate with the
 highest ``selection_score = base_score + 12 * (question concepts it covers that
@@ -44,16 +59,19 @@ from sciforge.models import Record, VerificationResult
 from sciforge.normalize import normalize_title
 from sciforge.query_expansion import CONCEPTS, keywords
 
-__all__ = ["CONCEPT_TEXT_PATTERNS", "CandidateScore", "RankedCandidate", "SelectionOutcome", "VERIFY_BACKFILL_FACTOR",
+__all__ = ["CONCEPT_TEXT_PATTERNS", "W_ABSTRACT_ANCHOR", "W_ABSTRACT_CONCEPT", "W_ABSTRACT_KEYWORD", "CandidateScore", "RankedCandidate", "SelectionOutcome", "VERIFY_BACKFILL_FACTOR",
            "rank_candidates", "score_candidates", "select_and_verify"]
 
-METHOD = ("deterministic title/abstract relevance scoring + greedy concept-diversity selection (no model); "
-          "verification backfill in rank order")
+METHOD = ("deterministic title + bounded-abstract relevance scoring + greedy concept-diversity ranking (no model), "
+          "source policy ordering/filtering, verification backfill in policy order")
 
 W_ANCHOR = 15
 W_CONCEPT = 10
 W_KEYWORD = 3
 W_ORIGINAL_QUERY = 2
+W_ABSTRACT_ANCHOR = 7
+W_ABSTRACT_CONCEPT = 5
+W_ABSTRACT_KEYWORD = 1
 MAX_QUERY_COUNT_BONUS = 3
 W_NOVELTY = 12
 REDUNDANCY_PENALTY = 15
@@ -127,6 +145,14 @@ class CandidateScore:
     components: dict[str, int] = field(default_factory=dict)
     base_score: int = 0
     text_used: tuple[str, ...] = ("title",)
+    abstract_components: dict[str, int] = field(default_factory=dict)
+    title_concepts: tuple[str, ...] = ()
+    abstract_only_concepts: tuple[str, ...] = ()
+
+    @property
+    def text_relevant(self) -> bool:
+        """True when the title or abstract matched at least one question concept or keyword."""
+        return bool(self.concepts_matched or self.keyword_hits)
 
     @property
     def facet_concepts(self) -> frozenset[str]:
@@ -137,7 +163,8 @@ class CandidateScore:
                 "concepts_matched": list(self.concepts_matched), "anchor_matched": self.anchor_matched,
                 "keyword_hits": list(self.keyword_hits), "query_ids": list(self.query_ids),
                 "databases": list(self.databases), "best_rank": self.best_rank,
-                "components": dict(self.components), "base_score": self.base_score}
+                "components": dict(self.components), "abstract_components": dict(self.abstract_components),
+                "abstract_only_concepts": list(self.abstract_only_concepts), "base_score": self.base_score}
 
 
 @dataclass(frozen=True)
@@ -166,7 +193,7 @@ def score_candidates(question: str, records: Sequence[Record],
 
     ``origins`` maps a (pre-dedup) ``record_id`` to ``(query_id, database, rank)`` tuples (rank 1-based);
     a merged record collects the origins of every record id in its provenance. ``abstracts`` (optional)
-    maps record ids to abstract text that was actually retrieved; v0.2 search results carry none.
+    maps record ids to abstract text that was actually retrieved (bounded abstract enrichment).
     """
     qtext = question.lower()
     relevant = [c for c in CONCEPTS if c.matches(qtext)]
@@ -174,18 +201,27 @@ def score_candidates(question: str, records: Sequence[Record],
     anchor_ids = {c.concept_id for c in relevant if c.role == "anchor"}
     stems = _stems(question)
     out: list[CandidateScore] = []
+
+    def analyse(text: str) -> tuple[tuple[str, ...], tuple[str, ...]]:
+        low = text.lower()
+        tokens = _WORD_RE.findall(low)
+        matched = tuple(cid for cid in relevant_ids if _text_matches(cid, low))
+        hits = tuple(st for st in stems if any(t.startswith(st) for t in tokens))
+        return matched, hits
+
     for record in records:
-        parts = [record.title or ""]
         used = ["title"] if record.title else []
+        t_matched, t_hits = analyse(record.title or "")
         abstract = (abstracts or {}).get(record.record_id)
+        a_matched: tuple[str, ...] = ()
+        a_hits: tuple[str, ...] = ()
         if abstract:
-            parts.append(abstract)
             used.append("abstract")
-        text = " ".join(parts).lower()
-        tokens = _WORD_RE.findall(text)
-        matched = tuple(cid for cid in relevant_ids if _text_matches(cid, text))
+            a_matched, a_hits = analyse(abstract)
+        matched = tuple(cid for cid in relevant_ids if cid in t_matched or cid in a_matched)
+        hits = tuple(st for st in stems if st in t_hits or st in a_hits)
         anchor = any(cid in anchor_ids for cid in matched)
-        hits = tuple(s for s in stems if any(t.startswith(s) for t in tokens))
+        t_anchor = any(cid in anchor_ids for cid in t_matched)
         ids = [p.source_record_id for p in record.provenance] or [record.record_id]
         if record.record_id not in ids:
             ids.insert(0, record.record_id)
@@ -195,18 +231,29 @@ def score_candidates(question: str, records: Sequence[Record],
         query_ids = tuple(sorted({q for q, _, _ in seen}, key=_qnum))
         databases = tuple(sorted({d for _, d, _ in seen}))
         best_rank = min((r for _, _, r in seen), default=None)
-        facets = [c for c in matched if c not in anchor_ids]
+        t_facets = [c for c in t_matched if c not in anchor_ids]
         components = {
-            "anchor": W_ANCHOR if anchor else 0,
-            "concept_coverage": W_CONCEPT * len(facets),
-            "core_term_relevance": W_KEYWORD * len(hits),
+            "anchor": W_ANCHOR if t_anchor else 0,
+            "concept_coverage": W_CONCEPT * len(t_facets),
+            "core_term_relevance": W_KEYWORD * len(t_hits),
             "query_origin": (W_ORIGINAL_QUERY if "q1" in query_ids else 0) + min(MAX_QUERY_COUNT_BONUS,
                                                                                  len(query_ids)),
         }
+        abstract_only = tuple(c for c in a_matched if c not in t_matched)
+        abstract_components: dict[str, int] = {}
+        if abstract:
+            abstract_components = {
+                "abstract_anchor": W_ABSTRACT_ANCHOR if (anchor and not t_anchor) else 0,
+                "abstract_concept_coverage": W_ABSTRACT_CONCEPT * sum(1 for c in abstract_only
+                                                                      if c not in anchor_ids),
+                "abstract_core_term_relevance": W_ABSTRACT_KEYWORD * sum(1 for h in a_hits if h not in t_hits),
+            }
         out.append(CandidateScore(record_id=record.record_id, title=record.title, concepts_matched=matched,
                                   anchor_matched=anchor, keyword_hits=hits, query_ids=query_ids, databases=databases,
-                                  best_rank=best_rank, components=components, base_score=sum(components.values()),
-                                  text_used=tuple(used)))
+                                  best_rank=best_rank, components=components,
+                                  base_score=sum(components.values()) + sum(abstract_components.values()),
+                                  text_used=tuple(used), abstract_components=abstract_components,
+                                  title_concepts=t_matched, abstract_only_concepts=abstract_only))
     return out
 
 

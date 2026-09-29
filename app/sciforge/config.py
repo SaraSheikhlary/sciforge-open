@@ -35,6 +35,16 @@ DEFAULT_CANDIDATE_POOL_PER_QUERY = 10
 MIN_CANDIDATE_POOL_PER_QUERY = 1
 MAX_CANDIDATE_POOL_PER_QUERY = 100
 
+# Bounded abstract enrichment before deterministic ranking (SCIFORGE_ABSTRACT_ENRICHMENT_LIMIT, integer 0-500;
+# 0 disables enrichment = title-only scoring). See sciforge.abstract_enrichment.
+DEFAULT_ABSTRACT_ENRICHMENT_LIMIT = 50
+MIN_ABSTRACT_ENRICHMENT_LIMIT = 0
+MAX_ABSTRACT_ENRICHMENT_LIMIT = 500
+
+# Source policy (SCIFORGE_SOURCE_POLICY). See sciforge.source_classification.
+SOURCE_POLICIES = ("allow_all", "peer_reviewed_preferred", "peer_reviewed_only")
+DEFAULT_SOURCE_POLICY = "peer_reviewed_preferred"
+
 
 class ConfigError(ValueError):
     """Raised when an environment variable has an invalid value."""
@@ -74,6 +84,17 @@ def _parse_int(env: Mapping[str, str], name: str, default: int, lo: int, hi: int
     return value
 
 
+def parse_source_policy(env: Mapping[str, str]) -> str:
+    """``SCIFORGE_SOURCE_POLICY``: allow_all | peer_reviewed_preferred (default) | peer_reviewed_only."""
+    raw = _clean(env.get("SCIFORGE_SOURCE_POLICY"))
+    if raw is None:
+        return DEFAULT_SOURCE_POLICY
+    value = raw.lower()
+    if value not in SOURCE_POLICIES:
+        raise ConfigError(f"SCIFORGE_SOURCE_POLICY must be one of {', '.join(SOURCE_POLICIES)}")
+    return value
+
+
 @dataclass(frozen=True)
 class Settings:
     """Immutable runtime settings.
@@ -95,6 +116,13 @@ class Settings:
             (``SCIFORGE_CANDIDATE_POOL_PER_QUERY``, default 10, integer 1-100;
             invalid values raise :class:`ConfigError`). Each query requests
             ``max(candidate_pool_per_query, max_results)`` records.
+        abstract_enrichment_limit: At most this many deduplicated candidates
+            are enriched with abstracts before ranking
+            (``SCIFORGE_ABSTRACT_ENRICHMENT_LIMIT``, default 50, integer 0-500;
+            0 disables enrichment; invalid values raise :class:`ConfigError`).
+        source_policy: ``allow_all`` / ``peer_reviewed_preferred`` (default) /
+            ``peer_reviewed_only`` (``SCIFORGE_SOURCE_POLICY``, case-insensitive;
+            invalid values raise :class:`ConfigError`).
     """
 
     ncbi_api_key: str | None = field(default=None, repr=False)
@@ -104,6 +132,8 @@ class Settings:
     backoff_seconds: float = DEFAULT_BACKOFF_SECONDS
     query_expansion: bool = True
     candidate_pool_per_query: int = DEFAULT_CANDIDATE_POOL_PER_QUERY
+    abstract_enrichment_limit: int = DEFAULT_ABSTRACT_ENRICHMENT_LIMIT
+    source_policy: str = DEFAULT_SOURCE_POLICY
 
     @classmethod
     def from_env(cls, environ: Mapping[str, str] | None = None) -> Settings:
@@ -122,6 +152,10 @@ class Settings:
             candidate_pool_per_query=_parse_int(env, "SCIFORGE_CANDIDATE_POOL_PER_QUERY",
                                                 DEFAULT_CANDIDATE_POOL_PER_QUERY, MIN_CANDIDATE_POOL_PER_QUERY,
                                                 MAX_CANDIDATE_POOL_PER_QUERY),
+            abstract_enrichment_limit=_parse_int(env, "SCIFORGE_ABSTRACT_ENRICHMENT_LIMIT",
+                                                 DEFAULT_ABSTRACT_ENRICHMENT_LIMIT, MIN_ABSTRACT_ENRICHMENT_LIMIT,
+                                                 MAX_ABSTRACT_ENRICHMENT_LIMIT),
+            source_policy=parse_source_policy(env),
         )
 
     @property
@@ -173,7 +207,8 @@ MAX_SPEND_DISABLED_WORDS = frozenset({"none"})
 
 # Model stages -> environment-variable suffix. Logical stage names are those of
 # sciforge.llm.client.stage_key ("evidence" is the extraction stage).
-MODEL_STAGES = ("question", "evidence", "gaps", "hypotheses", "report")
+# v0.4: hypothesis_critic and hypothesis_revision are the hypothesis engine's critic and revision calls.
+MODEL_STAGES = ("question", "evidence", "gaps", "hypotheses", "hypothesis_critic", "hypothesis_revision", "report")
 OUTPUT_TOKENS_ENV_PREFIX = "SCIFORGE_MODEL_MAX_OUTPUT_TOKENS_"
 # Per-stage output caps: blank/unset -> global SCIFORGE_MODEL_MAX_OUTPUT_TOKENS; otherwise an integer
 # 16-128000 (anything else is a configuration error, like the global setting).
@@ -183,7 +218,7 @@ REASONING_EFFORT_ENV = "SCIFORGE_MODEL_REASONING_EFFORT"
 REASONING_EFFORTS = ("low", "medium", "high", "xhigh")
 DEFAULT_REASONING_EFFORT = "high"
 # The question stage always uses the global value; these stages can override it.
-REASONING_EFFORT_STAGES = ("evidence", "gaps", "hypotheses", "report")
+REASONING_EFFORT_STAGES = ("evidence", "gaps", "hypotheses", "hypothesis_critic", "hypothesis_revision", "report")
 REASONING_EFFORT_STAGE_ENV = {stage: f"{REASONING_EFFORT_ENV}_{stage.upper()}" for stage in REASONING_EFFORT_STAGES}
 
 ELIGIBILITY_VERIFIED = "verified"
@@ -312,17 +347,22 @@ class ModelSettings:
     backoff_seconds: float = DEFAULT_BACKOFF_SECONDS
     store_prompts: bool = True
     eligibility: str = ELIGIBILITY_VERIFIED
-    entailment: bool = True
+    # Reserved: semantic (model-based) claim checking is NOT implemented; this flag has no effect (default false).
+    entailment: bool = False
     # Stage-aware output caps (None -> max_output_tokens_per_call) and reasoning effort.
     max_output_tokens_question: int | None = None
     max_output_tokens_evidence: int | None = None
     max_output_tokens_gaps: int | None = None
     max_output_tokens_hypotheses: int | None = None
+    max_output_tokens_hypothesis_critic: int | None = None     # recommended 4000
+    max_output_tokens_hypothesis_revision: int | None = None   # recommended 4000
     max_output_tokens_report: int | None = None
     reasoning_effort: str = DEFAULT_REASONING_EFFORT
     reasoning_effort_evidence: str | None = None
     reasoning_effort_gaps: str | None = None
     reasoning_effort_hypotheses: str | None = None
+    reasoning_effort_hypothesis_critic: str | None = None      # recommended high
+    reasoning_effort_hypothesis_revision: str | None = None    # recommended medium
     reasoning_effort_report: str | None = None
 
     def __post_init__(self) -> None:
@@ -401,7 +441,7 @@ class ModelSettings:
                 backoff_seconds=_parse_float(env, "SCIFORGE_BACKOFF_SECONDS", DEFAULT_BACKOFF_SECONDS, 0.0, 60.0),
                 store_prompts=_parse_bool(env, "SCIFORGE_STORE_PROMPTS", True),
                 eligibility=eligibility,
-                entailment=_parse_bool(env, "SCIFORGE_MODEL_ENTAILMENT", True),
+                entailment=_parse_bool(env, "SCIFORGE_MODEL_ENTAILMENT", False),
             )
         except ModelConfigError:
             raise

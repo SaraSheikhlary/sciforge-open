@@ -49,8 +49,23 @@ def _clean_env(monkeypatch: pytest.MonkeyPatch) -> None:
                  "SCIFORGE_MAX_RETRIES", "SCIFORGE_BACKOFF_SECONDS", "SCIFORGE_QUERY_EXPANSION",
                  "SCIFORGE_CANDIDATE_POOL_PER_QUERY", "XAI_API_KEY",
                  *MODEL_ENV_VARS,
-                 "SCIFORGE_LIVE_XAI"):
+                 "SCIFORGE_LIVE_XAI", "SCIFORGE_ABSTRACT_ENRICHMENT_LIMIT", "SCIFORGE_SOURCE_POLICY",
+                 "SCIFORGE_LIVE_ENABLED", "SCIFORGE_LIVE_REQUIRE_AUTH", "SCIFORGE_LIVE_ALLOWED_EMAILS"):
         monkeypatch.delenv(name, raising=False)
+
+
+@pytest.fixture(autouse=True)
+def _isolated_live_quota(monkeypatch: pytest.MonkeyPatch, tmp_path_factory: pytest.TempPathFactory) -> None:
+    """Live usage-limit store in a per-test temp dir (never the real ~/.local/state); kill switch cleared."""
+    for name in ("SCIFORGE_LIVE_KILL_SWITCH", "SCIFORGE_LIVE_MAX_RUNS_PER_USER", "SCIFORGE_LIVE_QUOTA_SALT",
+                 "SCIFORGE_LIVE_QUOTA_BACKEND", "SCIFORGE_LIVE_QUOTA_CONNECTION"):
+        monkeypatch.delenv(name, raising=False)
+    path = tmp_path_factory.mktemp("quota") / "live_quota.json"
+    monkeypatch.setenv("SCIFORGE_LIVE_QUOTA_PATH", str(path))
+    # tests that pass an explicit environ mapping fall back to the default path: redirect it too
+    import sciforge.live_quota as live_quota
+
+    monkeypatch.setattr(live_quota, "default_quota_path", lambda environ=None: path)
 
 
 @pytest.fixture
@@ -189,7 +204,15 @@ def api_handler(request: httpx.Request) -> httpx.Response:
     if path == "/works/10.3000/other":
         return json_response(crossref_work_payload(
             crossref_work("10.3000/other", title="Unrelated coral study", authors=[("Reef", "A")])))
+    if path.endswith("efetch.fcgi"):
+        return efetch_empty_response()        # abstract enrichment: no abstracts available
     return httpx.Response(500)
+
+
+def efetch_empty_response() -> httpx.Response:
+    """PubMed efetch XML without any article (abstract enrichment finds no abstract)."""
+    return httpx.Response(200, text="<PubmedArticleSet></PubmedArticleSet>",
+                          headers={"Content-Type": "text/xml"})
 
 
 @pytest.fixture

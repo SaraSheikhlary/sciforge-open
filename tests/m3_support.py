@@ -55,20 +55,68 @@ def gap(**overrides: Any) -> dict[str, Any]:
     return base
 
 
+def falsification(**overrides: Any) -> dict[str, Any]:
+    base = {"manipulated_or_compared": "Platelets under high shear with versus without GPIb blockade.",
+            "measured": "P-selectin expression on the platelet surface.",
+            "weakening_result": "P-selectin expression is unchanged by GPIb blockade under shear.",
+            "supporting_result": "P-selectin expression falls when GPIb is blocked during shear exposure."}
+    base.update(overrides)
+    return base
+
+
+def alternative(**overrides: Any) -> dict[str, Any]:
+    base = {"explanation": "Shear might activate platelets through a GPIb-independent route, such as membrane "
+                           "stretch.",
+            "basis": "inference", "evidence_ids": []}
+    base.update(overrides)
+    return base
+
+
 def hypothesis(**overrides: Any) -> dict[str, Any]:
+    """A v0.4 model hypothesis that passes every deterministic check against the M3 fixtures."""
     base = {
-        "hypothesis_id": "hyp_01",
-        "label": "hypothesis",
-        "statement": "Blocking GPIb may reduce the shear-induced P-selectin increase.",
-        "supporting_evidence_ids": ["ev_0001", "ev_0002"],
-        "research_gap_ids": ["gap_01"],
-        "rationale": "Both effects occur under high shear.",
-        "predicted_observable_outcome": "Lower P-selectin expression under shear when GPIb is blocked.",
+        "hypothesis_id": "h1",
+        "hypothesis": "Blocking GPIb may reduce the shear-induced P-selectin increase.",
+        "evidence_ids": ["ev_0001", "ev_0002"],
+        "research_gap_id": "gap_01",
+        "mechanistic_claim_level": "mechanistic_support",
+        "rationale": "Both effects occur under high shear, and unfolded factor binds GPIb more strongly.",
+        "prediction": "P-selectin expression under shear is lower when GPIb is blocked than without blockade.",
+        "alternative_explanation": alternative(),
+        "falsification_test": falsification(),
         "assumptions": ["GPIb binding precedes P-selectin exposure."],
+        "evidence_limitations": ["Both items come from single abstracts."],
         "confidence": "low",
     }
     base.update(overrides)
     return base
+
+
+CRITIC_CHECKS = ("evidence_supports_mechanism", "causal_language_exceeds_evidence", "distinct_from_evidence",
+                 "prediction_measurable", "prediction_discriminates", "falsification_meaningful",
+                 "ignored_contradictions_or_missing_evidence", "confidence_consistent")
+
+
+def critic_review(hid: str, *, fail: tuple[str, ...] = (), uncertain: tuple[str, ...] = (),
+                  problems: tuple[str, ...] = (), unsupported: tuple[str, ...] = (),
+                  explanation: str = "Looks consistent with the evidence.") -> dict[str, Any]:
+    checks = {}
+    for name in CRITIC_CHECKS:
+        verdict = "fail" if name in fail else "uncertain" if name in uncertain else "pass"
+        checks[name] = {"verdict": verdict, "explanation": explanation if verdict == "pass"
+                        else f"Problem with {name.replace('_', ' ')}."}
+    return {"hypothesis_id": hid, "checks": checks, "unsupported_evidence_ids": list(unsupported),
+            "substantive_problems": list(problems)}
+
+
+def candidate_ids(request) -> list[str]:
+    payload = json.loads(request.messages[-1].content)
+    return [c["hypothesis_id"] for c in payload.get("candidate_hypotheses", [])]
+
+
+def auto_critic(request) -> dict[str, Any]:
+    """Critic responder that passes every candidate named in the request."""
+    return {"reviews": [critic_review(hid) for hid in candidate_ids(request)]}
 
 
 def paragraph(**overrides: Any) -> dict[str, Any]:
@@ -92,11 +140,18 @@ def narrative(*extra: dict[str, Any]) -> dict[str, Any]:
         *extra]}
 
 
-def full_script(recs, *, gaps=None, hyps=None, narr=None) -> list[Any]:
-    return [question_output(), *evidence_items(recs),
-            gaps if gaps is not None else {"gaps": [gap()]},
-            hyps if hyps is not None else {"hypotheses": [hypothesis()]},
-            narr if narr is not None else narrative()]
+def full_script(recs, *, gaps=None, hyps=None, critic=None, revision=None, narr=None) -> list[Any]:
+    """Scripted outputs in pipeline order. ``critic=False`` omits the critic call (e.g. no candidates);
+    ``revision`` is only appended when given (the revision call only happens when something needs revising)."""
+    script = [question_output(), *evidence_items(recs),
+              gaps if gaps is not None else {"gaps": [gap()]},
+              hyps if hyps is not None else {"hypotheses": [hypothesis()]}]
+    if critic is not False:
+        script.append(critic if critic is not None else auto_critic)
+    if revision is not None:
+        script.append(revision)
+    script.append(narr if narr is not None else narrative())
+    return script
 
 
 def run(tmp_path, settings, script, *, recs=None, ver=None, **kw):

@@ -356,7 +356,7 @@ def test_web_live_mode_selects_at_most_max_sources_verified_records(tmp_path, mo
             return httpx.Response(200, text="<PubmedArticleSet></PubmedArticleSet>")
         return handler(request)
 
-    env = {"SCIFORGE_LIVE_ENABLED": "true", "XAI_API_KEY": FAKE_XAI_KEY, "XAI_MODEL": FAKE_XAI_MODEL,
+    env = {"SCIFORGE_LIVE_ENABLED": "true", "SCIFORGE_LIVE_REQUIRE_AUTH": "false", "XAI_API_KEY": FAKE_XAI_KEY, "XAI_MODEL": FAKE_XAI_MODEL,
            "SCIFORGE_MAX_SPEND_USD": "none", "SCIFORGE_MODEL_REASONING_EFFORT_EVIDENCE": "low"}
     clients = []
 

@@ -66,7 +66,7 @@ def test_mailto_on_search_and_verification_when_email_set():
     for req in requests:
         assert req.url.params["mailto"] == FAKE_EMAIL
         ua = req.headers["User-Agent"]
-        assert ua == f"SciForge/0.2.0 (https://github.com/SaraSheikhlary/sciforge-open; mailto:{FAKE_EMAIL})"
+        assert ua == f"SciForge/0.4.0 (https://github.com/SaraSheikhlary/sciforge-open; mailto:{FAKE_EMAIL})"
 
 
 def test_no_mailto_on_search_and_verification_when_email_unset():
@@ -75,7 +75,7 @@ def test_no_mailto_on_search_and_verification_when_email_unset():
     client.lookup("10.1000/abc123")
     for req in requests:
         assert "mailto" not in req.url.params
-        assert req.headers["User-Agent"] == "SciForge/0.2.0 (https://github.com/SaraSheikhlary/sciforge-open)"
+        assert req.headers["User-Agent"] == "SciForge/0.4.0 (https://github.com/SaraSheikhlary/sciforge-open)"
 
 
 def test_pubmed_email_only_when_set(make_harness):

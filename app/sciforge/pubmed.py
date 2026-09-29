@@ -11,6 +11,7 @@ from sciforge.http_utils import FetchResult, HttpFetcher, MalformedResponseError
 from sciforge.logging_utils import iso_utc
 from sciforge.models import ErrorEntry, LookupResult, Record, SearchOutcome
 from sciforge.normalize import normalize_doi, normalize_pmid
+from sciforge.source_classification import pubmed_metadata
 
 __all__ = ["PubMedClient", "normalize_pmid", "parse_esearch", "parse_esummary", "parse_pubmed_year", "record_from_summary"]
 
@@ -162,6 +163,9 @@ class PubMedClient:
         self.fetcher = fetcher
         self.settings = settings
         self.limiter = limiter or fetcher.make_limiter(settings.pubmed_min_interval)
+        # Side data captured from esummary search results (Records are unchanged):
+        # record_id -> publication types + journal (used for source-type classification only).
+        self.source_metadata: dict[str, dict[str, Any]] = {}
 
     def _base_params(self) -> dict[str, str]:
         params = {"tool": "sciforge"}
@@ -278,7 +282,9 @@ class PubMedClient:
                         )
                     )
                     continue
-                records.append(record_from_summary(pmid, doc, retrieved_at))
+                record = record_from_summary(pmid, doc, retrieved_at)
+                records.append(record)
+                self.source_metadata[record.record_id] = pubmed_metadata(doc, record.doi)
         if had_error:
             status = "partial" if records else "failed"
         else:

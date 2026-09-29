@@ -10,12 +10,12 @@ import pytest
 from conftest import Sleeper, mock_client
 from m2_support import item, no_throttle, question_output, tracker
 from m3_support import FIXED, QUESTION, QUOTE_1, api, evidence_items, full_script, gap, hypothesis, load, narrative, \
-    paragraph, records, run
+    paragraph, records, run, critic_review
 from sciforge.llm.fake import FakeModelClient
 from sciforge.model_pipeline import run_model_pipeline
 
 REC_RE = re.compile(r"^rec_[0-9a-f]{16}$")
-M3_STAGES = {"gaps", "hypotheses", "report"}
+M3_STAGES = {"gaps", "hypotheses", "hypothesis_critic", "report"}
 # the M2 extraction safe-summary key set (validated envelope), fixed since M2
 M2_SUMMARY_KEYS = {"redaction_mode", "call_record_id", "response_sha256", "response_length", "parse_status", "items"}
 
@@ -46,7 +46,9 @@ def m3_rejecting_script(recs):
     return [*m2_script_with_rejections(recs),
             "not json {",                                                         # gaps: repair
             {"gaps": [gap(), gap(supporting_evidence_ids=["ev_0999"])]},
-            {"hypotheses": [hypothesis(), hypothesis(research_gap_ids=[])]},
+            {"hypotheses": [hypothesis(), hypothesis(research_gap_id="")]},
+            # critic explanation with citation-like text -> withheld, so the critic entry is redacted too
+            {"reviews": [critic_review("hyp_01", explanation="Consistent with Smith et al. (2019).")]},
             narrative(paragraph(text="Rose by 70% [ev_0001]."))]
 
 

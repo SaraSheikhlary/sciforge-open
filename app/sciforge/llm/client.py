@@ -140,20 +140,38 @@ class ModelUsage:
 
     @property
     def billable_output_tokens(self) -> int | None:
-        """Output tokens to charge, including reasoning tokens (conservative).
+        """Output-side tokens to charge: ``output_tokens + reasoning_tokens`` (conservative).
 
-        xAI's docs example has ``total_tokens == input + output + reasoning``,
-        so ``output_tokens`` may exclude reasoning. When the total is known we
-        charge ``max(output, total - input)``; otherwise ``output + reasoning``.
+        xAI reports reasoning tokens SEPARATELY from output tokens (``usage.output_tokens_details.
+        reasoning_tokens``; confirmed externally by the project owner for grok-4.7 — not verifiable offline), so
+        the charge is ``output + reasoning`` whenever reasoning is reported. Reasoning is added exactly once. If a
+        ``total_tokens`` is reported and ``total - input`` is larger still, that larger value is charged
+        (``max`` — only ever raises the charge, never double counts beyond the reported total's implication).
+        Without reported reasoning tokens the charge is ``max(output, total - input)``.
         """
         if self.output_tokens is None:
             return None
         candidates = [self.output_tokens]
+        if self.reasoning_tokens is not None:
+            candidates.append(self.output_tokens + self.reasoning_tokens)
         if self.total_tokens is not None and self.input_tokens is not None:
             candidates.append(self.total_tokens - self.input_tokens)
-        elif self.reasoning_tokens is not None:
-            candidates.append(self.output_tokens + self.reasoning_tokens)
         return max(candidates)
+
+    @property
+    def reasoning_included_in_output(self) -> bool | None:
+        """Whether the reported ``output_tokens`` already include the reasoning tokens (None = cannot tell)."""
+        if self.output_tokens is None or self.reasoning_tokens is None:
+            return None
+        if self.reasoning_tokens > self.output_tokens:
+            return False
+        if self.total_tokens is not None and self.input_tokens is not None:
+            if self.total_tokens == self.input_tokens + self.output_tokens + self.reasoning_tokens \
+                    and self.reasoning_tokens > 0:
+                return False
+            if self.total_tokens == self.input_tokens + self.output_tokens:
+                return True
+        return None
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -164,6 +182,9 @@ class ModelUsage:
             "total_tokens": self.total_tokens,
             "cost_usd_reported": None if self.cost_usd_reported is None else str(self.cost_usd_reported),
             "cost_source": self.cost_source,
+            "cost_reported_status": "reported" if self.cost_usd_reported is not None else "unavailable",
+            "output_side_tokens": self.billable_output_tokens,
+            "reasoning_included_in_output_tokens": self.reasoning_included_in_output,
             "reported": self.reported,
         }
 

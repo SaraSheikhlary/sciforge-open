@@ -71,7 +71,8 @@ def test_date_filters_passed_through_pipeline(tmp_path, settings):
     assert cr["filter"] == "from-pub-date:2020,until-pub-date:2024"
     assert result.summary["parameters"] == {"max_results_per_source": 20, "from_year": 2020, "to_year": 2024,
                                             "candidate_pool_per_query": 10, "records_requested_per_query": 20,
-                                            "max_selected": 40}
+                                            "max_selected": 40, "abstract_enrichment_limit": 50,
+                                            "source_policy": "peer_reviewed_preferred"}
 
 
 def test_date_filters_passed_through_cli(tmp_path, fast_sleep):

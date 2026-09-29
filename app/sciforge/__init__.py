@@ -5,6 +5,6 @@ records, and verifies each record's DOI / PMID against the issuing database.
 It does not generate conclusions, extract evidence, or call any language model.
 """
 
-__version__ = "0.2.0"
+__version__ = "0.4.0"
 
 __all__ = ["__version__"]

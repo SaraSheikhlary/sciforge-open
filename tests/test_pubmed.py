@@ -30,7 +30,7 @@ def test_search_params_and_records(make_harness):
     assert es["datetype"] == "pdat" and es["mindate"] == "2015" and es["maxdate"] == "2020"
     assert es["tool"] == "sciforge" and es["email"] == FAKE_EMAIL and es["api_key"] == FAKE_API_KEY
     assert h.requests[1].url.params["id"] == "111,222"
-    assert h.requests[0].headers["User-Agent"].startswith("SciForge/0.2")
+    assert h.requests[0].headers["User-Agent"].startswith("SciForge/0.4")
     r1, r2 = out.records
     assert r1.pmid == "111" and r1.doi == "10.1000/abc123" and r1.year == 2021
     assert r1.authors == ["Smith JA", "Lee K"] and r1.journal == "Journal of Thrombosis"
